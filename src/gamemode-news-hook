@@ -81,12 +81,19 @@ def inject(sjc_path, bp_path, visible_gids, navigate=False):
         ws_bp.close()
 
 
-def monitor_cef(interval=10):
-    """Poll CEF debug port. Returns when CEF becomes unavailable."""
+def monitor_cef(sjc_path, interval=10):
+    """Poll hook liveness via __skGen. Returns when hook is gone or CEF is down."""
     while True:
         time.sleep(interval)
         try:
-            cef.get_pages()
+            ws = cef.connect("localhost", 8080, sjc_path)
+            try:
+                val = cef.evaluate(ws, "typeof window.__skGen !== 'undefined' ? 'alive' : 'gone'")
+            finally:
+                ws.close()
+            if val != "alive":
+                log.info("Hook state lost (JS context reset)")
+                return
         except Exception:
             return
 
@@ -128,8 +135,8 @@ def main():
             time.sleep(5)
             continue
 
-        monitor_cef()
-        log.info("CEF disconnected (Steam restarted?), will re-inject")
+        monitor_cef(sjc_path)
+        log.info("Hook lost or CEF disconnected, will re-inject")
 
 
 if __name__ == "__main__":

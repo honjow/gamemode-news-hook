@@ -3,40 +3,58 @@
     var VISIBLE_GIDS = /*VISIBLE_GIDS*/[];
     window.__skXhrLog = [];
 
-    // ── Fetch our community group announcements ──
-    var skResp = null;
-    try {
-        var x = new XMLHttpRequest();
-        x.open('GET',
-            'https://store.steampowered.com/events/ajaxgetadjacentpartnerevents/'
-            + '?clan_accountid=' + SK_CLAN
-            + '&count_before=0&count_after=50&lang_list=6_0&only_summaries=false',
-            false);
-        x.send();
-        if (x.status === 200) skResp = JSON.parse(x.responseText);
-    } catch(e) {}
+    function fetchOurEvents(applyFilter) {
+        var resp = null;
+        try {
+            var x = new XMLHttpRequest();
+            x.open('GET',
+                'https://store.steampowered.com/events/ajaxgetadjacentpartnerevents/'
+                + '?clan_accountid=' + SK_CLAN
+                + '&count_before=0&count_after=50&lang_list=6_0&only_summaries=false',
+                false);
+            x.send();
+            if (x.status === 200) resp = JSON.parse(x.responseText);
+        } catch(e) {}
+        if (!resp || !resp.events || resp.events.length === 0) return null;
 
-    if (!skResp || !skResp.events || skResp.events.length === 0)
-        return JSON.stringify({error: 'failed to fetch our events'});
-
-    // ── Filter out invisible/broken announcements ──
-    if (VISIBLE_GIDS.length > 0) {
-        var vset = {};
-        for (var vi = 0; vi < VISIBLE_GIDS.length; vi++) vset[VISIBLE_GIDS[vi]] = true;
-        var filtered = [];
-        for (var fi = 0; fi < skResp.events.length; fi++) {
-            var agid = skResp.events[fi].announcement_body && skResp.events[fi].announcement_body.gid;
-            if (agid && vset[String(agid)]) filtered.push(skResp.events[fi]);
+        if (applyFilter && VISIBLE_GIDS.length > 0) {
+            var vset = {};
+            for (var vi = 0; vi < VISIBLE_GIDS.length; vi++) vset[VISIBLE_GIDS[vi]] = true;
+            var filtered = [];
+            for (var fi = 0; fi < resp.events.length; fi++) {
+                var agid = resp.events[fi].announcement_body && resp.events[fi].announcement_body.gid;
+                if (agid && vset[String(agid)]) filtered.push(resp.events[fi]);
+            }
+            window.__skXhrLog.push('filter:' + resp.events.length + '->' + filtered.length);
+            if (filtered.length > 0) resp.events = filtered;
         }
-        window.__skXhrLog.push('filter:' + skResp.events.length + '->' + filtered.length);
-        skResp.events = filtered;
+
+        return resp.events;
     }
 
-    if (skResp.events.length === 0)
-        return JSON.stringify({error: 'no visible events after filter'});
+    function refreshEvents() {
+        var now = Date.now();
+        if (window.__skLastRefresh && (now - window.__skLastRefresh) < 10000) return;
+        window.__skLastRefresh = now;
+        var events = fetchOurEvents(true);
+        if (events && events.length > 0) {
+            window.__skOurEvents = events;
+            window.__skOurTitle = events[0].event_name;
+            window.__skTargetGids = {};
+            window.__skTargetCount = 0;
+            window.__skNextFallbackIdx = Object.keys(window.__skValveRank || {}).length;
+            window.__skXhrLog.push('refresh:' + events.length + ' events');
+        }
+    }
 
-    window.__skOurEvents = skResp.events;
-    window.__skOurTitle = skResp.events[0].event_name;
+    // ── Initial fetch with filter ──
+    var initEvents = fetchOurEvents(true);
+    if (!initEvents || initEvents.length === 0)
+        return JSON.stringify({error: 'failed to fetch our events'});
+
+    window.__skOurEvents = initEvents;
+    window.__skOurTitle = initEvents[0].event_name;
+    window.__skLastRefresh = Date.now();
 
     // ── Pre-fetch Valve frontpage events for sort order ──
     // Steam uses two different require_tags combos for the settings page,
@@ -189,6 +207,7 @@
         if (!this.__skTarget || this.__skGen !== GEN) return origSend.apply(this, arguments);
 
         this.__skTarget = false;
+        refreshEvents();
 
         var self = this;
         var cached = null;
@@ -228,7 +247,7 @@
 
     return JSON.stringify({
         ok: true,
-        events: skResp.events.length,
-        title: skResp.events[0].event_name
+        events: initEvents.length,
+        title: initEvents[0].event_name
     });
 })()
