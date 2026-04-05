@@ -50,33 +50,45 @@ def fetch_visible_gids():
         return []
 
 
-def inject_xhr_hook(ws, visible_gids):
-    """Read xhr-hook.js, fill in parameters, inject into SharedJSContext."""
-    js = read_js("xhr-hook.js")
-    js = js.replace("/*SK_CLAN*/0", str(SK_CLAN))
-    js = js.replace("/*VISIBLE_GIDS*/[]", json.dumps(visible_gids))
-    result = cef.evaluate(ws, js)
-    log.info("XHR hook result: %s", result)
-    return result
+def inject(sjc_path, bp_path, visible_gids, navigate=False):
+    """Inject XHR hook and observer into CEF pages."""
+    log.info("Injecting XHR hook into SharedJSContext...")
+    ws_sjc = cef.connect("localhost", 8080, sjc_path)
+    try:
+        js = read_js("xhr-hook.js")
+        js = js.replace("/*SK_CLAN*/0", str(SK_CLAN))
+        js = js.replace("/*VISIBLE_GIDS*/[]", json.dumps(visible_gids))
+        result = cef.evaluate(ws_sjc, js)
+        log.info("XHR hook result: %s", result)
+        if navigate:
+            log.info("Navigating library -> settings...")
+            cef.evaluate(ws_sjc, "SteamClient.URL.ExecuteSteamURL('steam://open/library')")
+            time.sleep(3)
+            cef.evaluate(ws_sjc, "SteamClient.URL.ExecuteSteamURL('steam://open/settings')")
+            time.sleep(3)
+            val = cef.evaluate(ws_sjc, "JSON.stringify({log: window.__skXhrLog, title: window.__skOurTitle})")
+            log.info("Post-navigation state: %s", val)
+    finally:
+        ws_sjc.close()
+
+    log.info("Injecting MutationObserver into BigPicture...")
+    ws_bp = cef.connect("localhost", 8080, bp_path)
+    try:
+        js = read_js("observer.js")
+        result = cef.evaluate(ws_bp, js)
+        log.info("Observer result: %s", result)
+    finally:
+        ws_bp.close()
 
 
-def inject_observer(ws):
-    """Read observer.js, inject into BigPicture page."""
-    js = read_js("observer.js")
-    result = cef.evaluate(ws, js)
-    log.info("Observer result: %s", result)
-    return result
-
-
-def navigate_refresh(ws):
-    """Force library -> settings navigation to trigger XHR hook."""
-    log.info("Navigating library -> settings...")
-    cef.evaluate(ws, "SteamClient.URL.ExecuteSteamURL('steam://open/library')")
-    time.sleep(3)
-    cef.evaluate(ws, "SteamClient.URL.ExecuteSteamURL('steam://open/settings')")
-    time.sleep(3)
-    val = cef.evaluate(ws, "JSON.stringify({log: window.__skXhrLog, title: window.__skOurTitle})")
-    log.info("Post-navigation state: %s", val)
+def monitor_cef(interval=10):
+    """Poll CEF debug port. Returns when CEF becomes unavailable."""
+    while True:
+        time.sleep(interval)
+        try:
+            cef.get_pages()
+        except Exception:
+            return
 
 
 def main():
@@ -84,42 +96,40 @@ def main():
     debug = "--debug" in sys.argv
     setup_logging(debug)
 
-    if auto:
-        log.info("Auto mode: waiting for Steam CEF...")
-        sjc_path, bp_path = cef.wait_for_pages()
-    else:
+    if not auto:
         log.info("Manual mode: connecting to CEF...")
         try:
             sjc_path, bp_path = cef.get_pages()
         except Exception as e:
             log.error("Cannot connect to CEF at localhost:8080: %s", e)
             sys.exit(1)
+        if not sjc_path or not bp_path:
+            log.error("Required CEF pages not found (SharedJSContext / BigPicture)")
+            sys.exit(1)
+        visible_gids = fetch_visible_gids()
+        inject(sjc_path, bp_path, visible_gids, navigate=True)
+        log.info("Done.")
+        return
 
-    if not sjc_path or not bp_path:
-        log.error("Required CEF pages not found (SharedJSContext / BigPicture)")
-        sys.exit(1)
+    # Daemon mode: inject, monitor, re-inject on Steam restart
+    while True:
+        log.info("Waiting for Steam CEF...")
+        sjc_path, bp_path = cef.wait_for_pages()
+        if not sjc_path or not bp_path:
+            log.warning("CEF wait timed out, retrying...")
+            continue
 
-    visible_gids = fetch_visible_gids()
+        visible_gids = fetch_visible_gids()
+        try:
+            inject(sjc_path, bp_path, visible_gids)
+            log.info("Injection complete, monitoring CEF...")
+        except Exception as e:
+            log.error("Injection failed: %s", e)
+            time.sleep(5)
+            continue
 
-    log.info("Injecting XHR hook into SharedJSContext...")
-    ws_sjc = cef.connect("localhost", 8080, sjc_path)
-    try:
-        inject_xhr_hook(ws_sjc, visible_gids)
-        if not auto:
-            navigate_refresh(ws_sjc)
-        else:
-            log.info("Auto mode: skipping forced navigation")
-    finally:
-        ws_sjc.close()
-
-    log.info("Injecting MutationObserver into BigPicture...")
-    ws_bp = cef.connect("localhost", 8080, bp_path)
-    try:
-        inject_observer(ws_bp)
-    finally:
-        ws_bp.close()
-
-    log.info("Done.")
+        monitor_cef()
+        log.info("CEF disconnected (Steam restarted?), will re-inject")
 
 
 if __name__ == "__main__":
