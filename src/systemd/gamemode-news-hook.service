@@ -1,0 +1,13 @@
+[Unit]
+Description=Steam Game Mode news card replacement hook
+After=gamescope-session-plus@steam.service
+BindsTo=gamescope-session-plus@steam.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/gamemode-news-hook --auto
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=gamescope-session-plus@steam.service

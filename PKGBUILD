@@ -30,7 +30,7 @@ package() {
     install -dm755 "${pkgdir}/usr/lib/gamemode-news-hook/js"
     install -m644 -t "${pkgdir}/usr/lib/gamemode-news-hook/js" "${source_dir}/lib/js"/*.js
 
-    # systemd drop-in for gamescope-session-plus
-    install -Dm644 "${source_dir}/systemd/gamemode-news-hook.conf" \
-        "${pkgdir}/usr/lib/systemd/user/gamescope-session-plus@.service.d/gamemode-news-hook.conf"
+    # systemd user service
+    install -Dm644 "${source_dir}/systemd/gamemode-news-hook.service" \
+        "${pkgdir}/usr/lib/systemd/user/gamemode-news-hook.service"
 }

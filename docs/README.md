@@ -63,7 +63,7 @@ src/
       xhr-hook.js                   # XHR Hook (injected into SharedJSContext)
       observer.js                   # MutationObserver (injected into BigPicture)
   systemd/
-    gamemode-news-hook.conf         # systemd drop-in for gamescope-session-plus
+    gamemode-news-hook.service      # systemd user service
 ```
 
 Install paths:
@@ -126,11 +126,23 @@ gamemode-news-hook --auto --debug
 
 ```bash
 makepkg -si
+systemctl --user enable gamemode-news-hook.service
+```
+
+The service is bound to `gamescope-session-plus@steam.service` and starts/stops automatically with it.
+
+### Service management
+
+```bash
+systemctl --user status gamemode-news-hook
+systemctl --user restart gamemode-news-hook
+journalctl --user -u gamemode-news-hook -f
 ```
 
 ## Notes
 
-- Must restart gamescope (`pkill gamescope`) after modifying hook logic, otherwise old hooks stack
+- Must restart the service after modifying hook logic, otherwise old hooks stack
 - Daemon mode monitors hook liveness and re-injects on Steam restart or JS context reset
+- `Restart=on-failure` ensures automatic recovery from crashes
 - `python-systemd` is optional; if installed, logs go to systemd journal
-- Config file changes take effect on next injection cycle (daemon mode) or next manual run
+- Config file changes take effect on next injection cycle or service restart
