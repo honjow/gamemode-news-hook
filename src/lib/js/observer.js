@@ -13,7 +13,17 @@
             if (!txt || txt.charCodeAt(0) !== 8203) continue;
 
             // Walk up to find the body content div (the one whose parent has 3-5 children)
+            // Skip if inside settings page layout (DialogControlsSection)
             var el = tw.currentNode.parentElement;
+            var inSettingsLayout = false;
+            for (var chk = el; chk; chk = chk.parentElement) {
+                if (chk.className && chk.className.indexOf('DialogControlsSection') !== -1) {
+                    inSettingsLayout = true;
+                    break;
+                }
+            }
+            if (inSettingsLayout) continue;
+
             for (var d = 0; d < 5 && el; d++) {
                 var parent = el.parentElement;
                 if (!parent || parent.children.length < 3) { el = parent; continue; }
