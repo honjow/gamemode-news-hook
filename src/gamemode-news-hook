@@ -37,27 +37,43 @@ def read_js(filename):
         return f.read()
 
 
-def fetch_visible_gids():
-    """Fetch visible announcement GIDs from community page for filtering."""
+def fetch_hidden_gids():
+    """Build blacklist: GIDs in API but not on community page."""
     try:
-        url = f"https://steamcommunity.com/gid/{SK_CLAN_STEAMID}/announcements"
-        html = urllib.request.urlopen(url, timeout=10).read().decode()
-        gids = list(set(re.findall(r'detail/(\d{10,})', html)))
-        log.info("Visible GIDs: %s", gids)
-        return gids
+        # Fetch all GIDs from API
+        api_url = (
+            f"https://store.steampowered.com/events/ajaxgetadjacentpartnerevents/"
+            f"?clan_accountid={SK_CLAN}&count_before=0&count_after=50"
+            f"&lang_list=6_0&only_summaries=true"
+        )
+        api_resp = json.loads(urllib.request.urlopen(api_url, timeout=10).read().decode())
+        api_gids = set()
+        for ev in api_resp.get("events", []):
+            ab = ev.get("announcement_body")
+            if ab and ab.get("gid"):
+                api_gids.add(str(ab["gid"]))
+
+        # Fetch visible GIDs from community page
+        page_url = f"https://steamcommunity.com/gid/{SK_CLAN_STEAMID}/announcements"
+        html = urllib.request.urlopen(page_url, timeout=10).read().decode()
+        page_gids = set(re.findall(r'detail/(\d{10,})', html))
+
+        hidden = list(api_gids - page_gids)
+        log.info("API GIDs: %s, Page GIDs: %s, Hidden: %s", api_gids, page_gids, hidden)
+        return hidden
     except Exception as e:
-        log.warning("Failed to fetch visible GIDs, skipping filter: %s", e)
+        log.warning("Failed to build hidden GIDs list: %s", e)
         return []
 
 
-def inject(sjc_path, bp_path, visible_gids, navigate=False):
+def inject(sjc_path, bp_path, hidden_gids, navigate=False):
     """Inject XHR hook and observer into CEF pages."""
     log.info("Injecting XHR hook into SharedJSContext...")
     ws_sjc = cef.connect("localhost", 8080, sjc_path)
     try:
         js = read_js("xhr-hook.js")
         js = js.replace("/*SK_CLAN*/0", str(SK_CLAN))
-        js = js.replace("/*VISIBLE_GIDS*/[]", json.dumps(visible_gids))
+        js = js.replace("/*HIDDEN_GIDS*/[]", json.dumps(hidden_gids))
         result = cef.evaluate(ws_sjc, js)
         log.info("XHR hook result: %s", result)
         if navigate:
@@ -113,8 +129,8 @@ def main():
         if not sjc_path or not bp_path:
             log.error("Required CEF pages not found (SharedJSContext / BigPicture)")
             sys.exit(1)
-        visible_gids = fetch_visible_gids()
-        inject(sjc_path, bp_path, visible_gids, navigate=True)
+        hidden_gids = fetch_hidden_gids()
+        inject(sjc_path, bp_path, hidden_gids, navigate=True)
         log.info("Done.")
         return
 
@@ -126,9 +142,9 @@ def main():
             log.warning("CEF wait timed out, retrying...")
             continue
 
-        visible_gids = fetch_visible_gids()
+        hidden_gids = fetch_hidden_gids()
         try:
-            inject(sjc_path, bp_path, visible_gids)
+            inject(sjc_path, bp_path, hidden_gids)
             log.info("Injection complete, monitoring CEF...")
         except Exception as e:
             log.error("Injection failed: %s", e)

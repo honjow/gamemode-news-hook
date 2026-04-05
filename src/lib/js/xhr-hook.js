@@ -1,6 +1,6 @@
 (function() {
     var SK_CLAN = /*SK_CLAN*/0;
-    var VISIBLE_GIDS = /*VISIBLE_GIDS*/[];
+    var HIDDEN_GIDS = /*HIDDEN_GIDS*/[];
     window.__skXhrLog = [];
 
     function fetchOurEvents(applyFilter) {
@@ -17,15 +17,15 @@
         } catch(e) {}
         if (!resp || !resp.events || resp.events.length === 0) return null;
 
-        if (applyFilter && VISIBLE_GIDS.length > 0) {
-            var vset = {};
-            for (var vi = 0; vi < VISIBLE_GIDS.length; vi++) vset[VISIBLE_GIDS[vi]] = true;
+        if (applyFilter && HIDDEN_GIDS.length > 0) {
+            var hset = {};
+            for (var hi = 0; hi < HIDDEN_GIDS.length; hi++) hset[HIDDEN_GIDS[hi]] = true;
             var filtered = [];
             for (var fi = 0; fi < resp.events.length; fi++) {
                 var agid = resp.events[fi].announcement_body && resp.events[fi].announcement_body.gid;
-                if (agid && vset[String(agid)]) filtered.push(resp.events[fi]);
+                if (!agid || !hset[String(agid)]) filtered.push(resp.events[fi]);
             }
-            window.__skXhrLog.push('filter:' + resp.events.length + '->' + filtered.length);
+            window.__skXhrLog.push('blacklist:' + resp.events.length + '->' + filtered.length);
             if (filtered.length > 0) resp.events = filtered;
         }
 
