@@ -4,15 +4,25 @@
     var SK_MARKER = '\u200B';
 
     function patchDOM() {
-        var voteAreas = document.querySelectorAll('div.mKmrOjr9bGjKAolgp9NoD');
-        for (var i = 0; i < voteAreas.length; i++) {
-            var va = voteAreas[i];
-            var card = va.closest('[class*="PartnerEvent"]')
-                    || va.closest('[class*="EventSummary"]')
-                    || va.parentElement && va.parentElement.parentElement;
-            if (card) {
-                var html = (card.innerHTML || '');
-                va.style.display = (html.indexOf(SK_MARKER) !== -1) ? 'none' : '';
+        // Structural detection (no class name dependency)
+        // In the expanded card view, each card has: IMG, metadata, body(with marker), voteArea
+        // The vote area is the last sibling of the body content div containing the marker
+        var tw = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+        while (tw.nextNode()) {
+            var txt = tw.currentNode.textContent;
+            if (!txt || txt.charCodeAt(0) !== 8203) continue;
+
+            // Walk up to find the body content div (the one whose parent has 3-5 children)
+            var el = tw.currentNode.parentElement;
+            for (var d = 0; d < 5 && el; d++) {
+                var parent = el.parentElement;
+                if (!parent || parent.children.length < 3) { el = parent; continue; }
+                var lastChild = parent.children[parent.children.length - 1];
+                if (lastChild !== el && lastChild.tagName === 'DIV' && lastChild.children.length <= 3) {
+                    lastChild.style.display = 'none';
+                    break;
+                }
+                el = parent;
             }
         }
     }
