@@ -3,7 +3,7 @@
 gamemode-news-hook — Replace Steam Game Mode update cards with community announcements.
 
 Injects JS into Steam's CEF pages via remote debugging protocol to replace
-Valve event cards (appid=1675200) with our community group announcements.
+Valve event cards with custom community group announcements.
 """
 
 import json
@@ -11,24 +11,85 @@ import sys
 import os
 import time
 import re
+import signal
 import logging
+import configparser
 import urllib.request
 
 SCRIPT_DIR = "/usr/lib/gamemode-news-hook"
+CONFIG_PATH = "/etc/gamemode-news-hook.conf"
+
 sys.path.insert(0, SCRIPT_DIR)
 
 import cef
 
-SK_CLAN = int(os.environ.get("SK_CLAN", 46069703))
-SK_CLAN_STEAMID = (1 << 56) | (7 << 52) | SK_CLAN
-
 log = logging.getLogger("gamemode-news-hook")
+
+DEFAULTS = {
+    "clan_id": "46069703",
+    "target_appid": "1675200",
+    "cef_host": "localhost",
+    "cef_port": "8080",
+    "lang_list": "6_0",
+    "monitor_interval": "10",
+    "refresh_debounce": "10",
+}
+
+_last_hidden_gids = []
+
+
+def load_config():
+    """Load config from file, with env var overrides. Returns a dict."""
+    cfg = dict(DEFAULTS)
+
+    parser = configparser.ConfigParser()
+    if os.path.exists(CONFIG_PATH):
+        parser.read(CONFIG_PATH, encoding="utf-8")
+        if parser.has_section("hook"):
+            cfg.update(dict(parser.items("hook")))
+        log.debug("Loaded config from %s", CONFIG_PATH)
+
+    env_map = {
+        "GNHOOK_CLAN_ID": "clan_id",
+        "GNHOOK_TARGET_APPID": "target_appid",
+        "GNHOOK_CEF_HOST": "cef_host",
+        "GNHOOK_CEF_PORT": "cef_port",
+        "GNHOOK_LANG_LIST": "lang_list",
+        "GNHOOK_MONITOR_INTERVAL": "monitor_interval",
+        "GNHOOK_REFRESH_DEBOUNCE": "refresh_debounce",
+        "SK_CLAN": "clan_id",
+    }
+    for env_key, cfg_key in env_map.items():
+        val = os.environ.get(env_key)
+        if val is not None:
+            cfg[cfg_key] = val
+
+    cfg["clan_id"] = int(cfg["clan_id"])
+    cfg["target_appid"] = int(cfg["target_appid"])
+    cfg["cef_port"] = int(cfg["cef_port"])
+    cfg["monitor_interval"] = int(cfg["monitor_interval"])
+    cfg["refresh_debounce"] = int(cfg["refresh_debounce"])
+    cfg["clan_steamid"] = (1 << 56) | (7 << 52) | cfg["clan_id"]
+
+    return cfg
 
 
 def setup_logging(debug=False):
     level = logging.DEBUG if debug else logging.INFO
-    fmt = "[%(levelname)s] %(message)s"
-    logging.basicConfig(level=level, format=fmt, stream=sys.stderr)
+    fmt = "%(asctime)s [%(levelname)s] %(message)s"
+    datefmt = "%Y-%m-%d %H:%M:%S"
+
+    try:
+        from systemd.journal import JournalHandler
+        handler = JournalHandler(SYSLOG_IDENTIFIER="gamemode-news-hook")
+        handler.setFormatter(logging.Formatter("[%(levelname)s] %(message)s"))
+        logging.root.addHandler(handler)
+        logging.root.setLevel(level)
+        return
+    except ImportError:
+        pass
+
+    logging.basicConfig(level=level, format=fmt, datefmt=datefmt, stream=sys.stderr)
 
 
 def read_js(filename):
@@ -37,14 +98,15 @@ def read_js(filename):
         return f.read()
 
 
-def fetch_hidden_gids():
-    """Build blacklist: GIDs in API but not on community page."""
+def fetch_hidden_gids(cfg):
+    """Build blacklist: GIDs in API but not on community page.
+    Falls back to cached result on failure."""
+    global _last_hidden_gids
     try:
-        # Fetch all GIDs from API
         api_url = (
             f"https://store.steampowered.com/events/ajaxgetadjacentpartnerevents/"
-            f"?clan_accountid={SK_CLAN}&count_before=0&count_after=50"
-            f"&lang_list=6_0&only_summaries=true"
+            f"?clan_accountid={cfg['clan_id']}&count_before=0&count_after=50"
+            f"&lang_list={cfg['lang_list']}&only_summaries=true"
         )
         api_resp = json.loads(urllib.request.urlopen(api_url, timeout=10).read().decode())
         api_gids = set()
@@ -53,27 +115,35 @@ def fetch_hidden_gids():
             if ab and ab.get("gid"):
                 api_gids.add(str(ab["gid"]))
 
-        # Fetch visible GIDs from community page
-        page_url = f"https://steamcommunity.com/gid/{SK_CLAN_STEAMID}/announcements"
+        page_url = f"https://steamcommunity.com/gid/{cfg['clan_steamid']}/announcements"
         html = urllib.request.urlopen(page_url, timeout=10).read().decode()
         page_gids = set(re.findall(r'detail/(\d{10,})', html))
 
         hidden = list(api_gids - page_gids)
-        log.info("API GIDs: %s, Page GIDs: %s, Hidden: %s", api_gids, page_gids, hidden)
+        log.info("API GIDs: %d, Page GIDs: %d, Hidden: %s", len(api_gids), len(page_gids), hidden)
+        _last_hidden_gids = hidden
         return hidden
     except Exception as e:
         log.warning("Failed to build hidden GIDs list: %s", e)
+        if _last_hidden_gids:
+            log.info("Using cached hidden GIDs from previous successful fetch")
+            return _last_hidden_gids
         return []
 
 
-def inject(sjc_path, bp_path, hidden_gids, navigate=False):
+def inject(cfg, sjc_path, bp_path, hidden_gids, navigate=False):
     """Inject XHR hook and observer into CEF pages."""
+    host, port = cfg["cef_host"], cfg["cef_port"]
+
     log.info("Injecting XHR hook into SharedJSContext...")
-    ws_sjc = cef.connect("localhost", 8080, sjc_path)
+    ws_sjc = cef.connect(host, port, sjc_path)
     try:
         js = read_js("xhr-hook.js")
-        js = js.replace("/*SK_CLAN*/0", str(SK_CLAN))
+        js = js.replace("/*SK_CLAN*/0", str(cfg["clan_id"]))
         js = js.replace("/*HIDDEN_GIDS*/[]", json.dumps(hidden_gids))
+        js = js.replace("/*TARGET_APPID*/1675200", str(cfg["target_appid"]))
+        js = js.replace("/*LANG_LIST*/'6_0'", f"'{cfg['lang_list']}'")
+        js = js.replace("/*REFRESH_DEBOUNCE*/10000", str(cfg["refresh_debounce"] * 1000))
         result = cef.evaluate(ws_sjc, js)
         log.info("XHR hook result: %s", result)
         if navigate:
@@ -88,7 +158,7 @@ def inject(sjc_path, bp_path, hidden_gids, navigate=False):
         ws_sjc.close()
 
     log.info("Injecting MutationObserver into BigPicture...")
-    ws_bp = cef.connect("localhost", 8080, bp_path)
+    ws_bp = cef.connect(host, port, bp_path)
     try:
         js = read_js("observer.js")
         result = cef.evaluate(ws_bp, js)
@@ -97,12 +167,18 @@ def inject(sjc_path, bp_path, hidden_gids, navigate=False):
         ws_bp.close()
 
 
-def monitor_cef(sjc_path, interval=10):
-    """Poll hook liveness via __skGen. Returns when hook is gone or CEF is down."""
-    while True:
+def monitor_cef(cfg, sjc_path):
+    """Poll hook liveness via __skGen. Returns when hook is gone or CEF is down.
+    Retries a few times before declaring dead to avoid false positives."""
+    host, port = cfg["cef_host"], cfg["cef_port"]
+    interval = cfg["monitor_interval"]
+    fail_count = 0
+    max_failures = 3
+
+    while not _shutdown:
         time.sleep(interval)
         try:
-            ws = cef.connect("localhost", 8080, sjc_path)
+            ws = cef.connect(host, port, sjc_path)
             try:
                 val = cef.evaluate(ws, "typeof window.__skGen !== 'undefined' ? 'alive' : 'gone'")
             finally:
@@ -110,8 +186,22 @@ def monitor_cef(sjc_path, interval=10):
             if val != "alive":
                 log.info("Hook state lost (JS context reset)")
                 return
-        except Exception:
-            return
+            fail_count = 0
+        except Exception as e:
+            fail_count += 1
+            if fail_count >= max_failures:
+                log.info("CEF unreachable after %d attempts: %s", fail_count, e)
+                return
+            log.debug("Monitor check failed (attempt %d/%d): %s", fail_count, max_failures, e)
+
+
+_shutdown = False
+
+
+def _handle_signal(signum, frame):
+    global _shutdown
+    log.info("Received signal %d, shutting down...", signum)
+    _shutdown = True
 
 
 def main():
@@ -119,40 +209,50 @@ def main():
     debug = "--debug" in sys.argv
     setup_logging(debug)
 
+    signal.signal(signal.SIGTERM, _handle_signal)
+    signal.signal(signal.SIGINT, _handle_signal)
+
+    cfg = load_config()
+    log.info("Config: clan_id=%d, target_appid=%d, cef=%s:%d",
+             cfg["clan_id"], cfg["target_appid"], cfg["cef_host"], cfg["cef_port"])
+
     if not auto:
         log.info("Manual mode: connecting to CEF...")
         try:
-            sjc_path, bp_path = cef.get_pages()
+            sjc_path, bp_path = cef.get_pages(cfg["cef_host"], cfg["cef_port"])
         except Exception as e:
-            log.error("Cannot connect to CEF at localhost:8080: %s", e)
+            log.error("Cannot connect to CEF at %s:%d: %s", cfg["cef_host"], cfg["cef_port"], e)
             sys.exit(1)
         if not sjc_path or not bp_path:
             log.error("Required CEF pages not found (SharedJSContext / BigPicture)")
             sys.exit(1)
-        hidden_gids = fetch_hidden_gids()
-        inject(sjc_path, bp_path, hidden_gids, navigate=True)
+        hidden_gids = fetch_hidden_gids(cfg)
+        inject(cfg, sjc_path, bp_path, hidden_gids, navigate=True)
         log.info("Done.")
         return
 
-    # Daemon mode: inject, monitor, re-inject on Steam restart
-    while True:
+    # Daemon mode
+    while not _shutdown:
         log.info("Waiting for Steam CEF...")
-        sjc_path, bp_path = cef.wait_for_pages()
+        sjc_path, bp_path = cef.wait_for_pages(host=cfg["cef_host"], port=cfg["cef_port"])
         if not sjc_path or not bp_path:
             log.warning("CEF wait timed out, retrying...")
             continue
 
-        hidden_gids = fetch_hidden_gids()
+        hidden_gids = fetch_hidden_gids(cfg)
         try:
-            inject(sjc_path, bp_path, hidden_gids)
-            log.info("Injection complete, monitoring CEF...")
+            inject(cfg, sjc_path, bp_path, hidden_gids)
+            log.info("Injection complete, monitoring...")
         except Exception as e:
             log.error("Injection failed: %s", e)
             time.sleep(5)
             continue
 
-        monitor_cef(sjc_path)
-        log.info("Hook lost or CEF disconnected, will re-inject")
+        monitor_cef(cfg, sjc_path)
+        if not _shutdown:
+            log.info("Hook lost or CEF disconnected, will re-inject")
+
+    log.info("Shutdown complete.")
 
 
 if __name__ == "__main__":

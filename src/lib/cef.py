@@ -87,10 +87,14 @@ def evaluate(ws, expression, retries=1):
                 raise
 
 
-def _find_page(pages, keyword):
+def _find_page(pages, keyword, host="localhost", port=8080):
     for p in pages:
         if keyword in p.get("title", ""):
-            return p["webSocketDebuggerUrl"].replace("ws://localhost:8080", "")
+            ws_url = p["webSocketDebuggerUrl"]
+            prefix = f"ws://{host}:{port}"
+            if ws_url.startswith(prefix):
+                return ws_url[len(prefix):]
+            return ws_url.split("/devtools", 1)[-1]
     return None
 
 
@@ -99,8 +103,8 @@ def get_pages(host="localhost", port=8080):
     conn = http.client.HTTPConnection(host, port, timeout=5)
     conn.request("GET", "/json")
     pages = json.loads(conn.getresponse().read())
-    sjc = _find_page(pages, "SharedJSContext")
-    bp = _find_page(pages, "大屏幕") or _find_page(pages, "Big Picture")
+    sjc = _find_page(pages, "SharedJSContext", host, port)
+    bp = _find_page(pages, "大屏幕", host, port) or _find_page(pages, "Big Picture", host, port)
     return sjc, bp
 
 

@@ -1,13 +1,15 @@
 # Maintainer: honjow
 # shellcheck disable=SC2034
 pkgname=gamemode-news-hook
-pkgver=1.0.0
+pkgver=1.1.0
 pkgrel=1
 pkgdesc="Replace Steam Game Mode update cards with community group announcements"
 arch=('any')
 url="https://github.com/honjow/gamemode-news-hook"
 license=('MIT')
 depends=('python')
+optdepends=('python-systemd: systemd journal logging')
+backup=('etc/gamemode-news-hook.conf')
 source=("$pkgname-$pkgver.tar.gz::${url}/archive/refs/tags/v${pkgver}.tar.gz")
 sha256sums=('SKIP')
 options=(!strip)
@@ -17,6 +19,9 @@ package() {
 
     # entry script
     install -Dm755 "${source_dir}/gamemode-news-hook" "${pkgdir}/usr/bin/gamemode-news-hook"
+
+    # config
+    install -Dm644 "${source_dir}/gamemode-news-hook.conf" "${pkgdir}/etc/gamemode-news-hook.conf"
 
     # lib
     install -dm755 "${pkgdir}/usr/lib/gamemode-news-hook"

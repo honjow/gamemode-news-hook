@@ -1,7 +1,14 @@
 (function() {
     var SK_CLAN = /*SK_CLAN*/0;
     var HIDDEN_GIDS = /*HIDDEN_GIDS*/[];
+    var TARGET_APPID = /*TARGET_APPID*/1675200;
+    var LANG_LIST = /*LANG_LIST*/'6_0';
+    var REFRESH_DEBOUNCE = /*REFRESH_DEBOUNCE*/10000;
+    var VERSION = '1.1.0';
     window.__skXhrLog = [];
+    window.__skVersion = VERSION;
+
+    var TARGET_APPID_STR = 'appid=' + TARGET_APPID;
 
     function fetchOurEvents(applyFilter) {
         var resp = null;
@@ -10,7 +17,8 @@
             x.open('GET',
                 'https://store.steampowered.com/events/ajaxgetadjacentpartnerevents/'
                 + '?clan_accountid=' + SK_CLAN
-                + '&count_before=0&count_after=50&lang_list=6_0&only_summaries=false',
+                + '&count_before=0&count_after=50&lang_list=' + LANG_LIST
+                + '&only_summaries=false',
                 false);
             x.send();
             if (x.status === 200) resp = JSON.parse(x.responseText);
@@ -34,7 +42,7 @@
 
     function refreshEvents() {
         var now = Date.now();
-        if (window.__skLastRefresh && (now - window.__skLastRefresh) < 10000) return;
+        if (window.__skLastRefresh && (now - window.__skLastRefresh) < REFRESH_DEBOUNCE) return;
         window.__skLastRefresh = now;
         var events = fetchOurEvents(true);
         if (events && events.length > 0) {
@@ -57,8 +65,6 @@
     window.__skLastRefresh = Date.now();
 
     // ── Pre-fetch Valve frontpage events for sort order ──
-    // Steam uses two different require_tags combos for the settings page,
-    // each returning a different GID. Pre-request both to build a rank map.
     var screenGids = [];
     var screenSeen = {};
     var tagSets = ['&require_tags=patchnotes', '&require_tags=patchnotes,stablechannel'];
@@ -67,7 +73,9 @@
             var xv = new XMLHttpRequest();
             xv.open('GET',
                 'https://store.steampowered.com/events/ajaxgetadjacentpartnerevents/'
-                + '?appid=1675200&count_before=0&count_after=1&lang_list=6_0&only_summaries=true'
+                + '?appid=' + TARGET_APPID
+                + '&count_before=0&count_after=1&lang_list=' + LANG_LIST
+                + '&only_summaries=true'
                 + tagSets[ti],
                 false);
             xv.send();
@@ -114,7 +122,7 @@
         this.__skGen = window.__skGen;
         this.__skTarget = (
             this.__skUrl.indexOf('ajaxgetadjacentpartnerevents') !== -1 &&
-            this.__skUrl.indexOf('appid=1675200') !== -1
+            this.__skUrl.indexOf(TARGET_APPID_STR) !== -1
         );
         if (this.__skUrl.indexOf('ajaxgetadjacentpartnerevents') !== -1 ||
             this.__skUrl.indexOf('partnerevent') !== -1) {
@@ -130,7 +138,6 @@
             var ours = window.__skOurEvents;
             if (!orig.events || !ours) return rawText;
 
-            // Collect new target GIDs, assign idx from rank map or fallback
             for (var i = 0; i < orig.events.length && window.__skTargetCount < ours.length; i++) {
                 var g = String(orig.events[i].gid);
                 if (!window.__skTargetGids[g]) {
@@ -158,7 +165,6 @@
             }
             window.__skXhrLog.push('resp_gids:[' + allGids.join(',') + '] count=' + orig.events.length);
 
-            // Replace matched events
             var replaced = 0;
             for (var i = 0; i < orig.events.length; i++) {
                 var gid = String(orig.events[i].gid);
@@ -247,6 +253,7 @@
 
     return JSON.stringify({
         ok: true,
+        version: VERSION,
         events: initEvents.length,
         title: initEvents[0].event_name
     });

@@ -3,20 +3,60 @@
 Replace Steam Game Mode update cards with community group announcements.
 
 Injects JavaScript into Steam's CEF pages via remote debugging protocol to replace
-Valve event cards (appid=1675200) with custom community group announcements (SkorionOS / SKOS).
+Valve event cards with custom community group announcements.
 
 ## How it works
 
-1. **XHR Hook** (SharedJSContext) — intercepts `ajaxgetadjacentpartnerevents?appid=1675200` responses and replaces event content with our community announcements
-2. **MutationObserver** (BigPicture) — hides like/discuss buttons on replaced cards via zero-width space marker detection
-3. **Forced navigation** (manual mode only) — triggers library → settings navigation to force React Query to re-fetch
+1. **XHR Hook** (SharedJSContext) — intercepts event API responses and replaces content with community announcements
+2. **MutationObserver** (BigPicture) — hides like/discuss buttons on replaced cards via zero-width space marker
+3. **Daemon mode** — monitors hook liveness and re-injects on Steam restart or JS context reset
+4. **Blacklist filter** — excludes broken announcements (present in API but missing from community page)
+
+## Configuration
+
+Config file: `/etc/gamemode-news-hook.conf`
+
+```ini
+[hook]
+# Steam community group Account ID
+clan_id = 46069703
+
+# Valve appid whose events will be replaced (1675200 = Steam Deck updates)
+target_appid = 1675200
+
+# CEF remote debugging endpoint
+cef_host = localhost
+cef_port = 8080
+
+# Steam API language code
+lang_list = 6_0
+
+# Daemon mode: seconds between hook liveness checks
+monitor_interval = 10
+
+# Minimum seconds between announcement re-fetches in JS
+refresh_debounce = 10
+```
+
+Priority: environment variables > config file > defaults.
+
+Environment variables: `GNHOOK_CLAN_ID`, `GNHOOK_TARGET_APPID`, `GNHOOK_CEF_HOST`,
+`GNHOOK_CEF_PORT`, `GNHOOK_LANG_LIST`, `GNHOOK_MONITOR_INTERVAL`, `GNHOOK_REFRESH_DEBOUNCE`.
+`SK_CLAN` is also supported for backward compatibility.
+
+### Using with your own community group
+
+1. Find your group's Account ID from your Steam community group URL or API
+2. Edit `/etc/gamemode-news-hook.conf` and set `clan_id` to your group's ID
+3. Restart gamescope or the daemon process
 
 ## File structure
 
 ```
 src/
   gamemode-news-hook                # Entry script (Python3)
-  lib/                              # Library modules
+  gamemode-news-hook.conf           # Default config file
+  lib/
     __init__.py
     cef.py                          # CEF/WebSocket communication layer
     js/
@@ -26,64 +66,45 @@ src/
     gamemode-news-hook.conf         # systemd drop-in for gamescope-session-plus
 ```
 
-Install paths: `/usr/bin/gamemode-news-hook` and `/usr/lib/gamemode-news-hook/`
+Install paths:
+- `/usr/bin/gamemode-news-hook`
+- `/usr/lib/gamemode-news-hook/`
+- `/etc/gamemode-news-hook.conf`
 
 ## Architecture
 
-### Entry script `gamemode-news-hook`
+### Entry script
 
-- Parse arguments (`--auto`, `--debug`)
-- Call `cef.py` to wait for CEF pages
-- Fetch visible announcement GIDs (filtering logic)
-- Read JS files, fill in parameters (`SK_CLAN`, `VISIBLE_GIDS`), inject via CEF
+- Loads config (file + env overrides)
+- **Manual mode**: connect, inject, navigate, exit
+- **Daemon mode** (`--auto`): loop of wait → inject → monitor → re-inject
+- Signal handling: graceful shutdown on SIGTERM/SIGINT
 
 ### `cef.py` — CEF communication layer
 
-- `ws_connect / ws_send / ws_recv` — raw WebSocket (no external deps)
-- `evaluate(ws, expression)` — CDP Runtime.evaluate wrapper (with retry)
-- `get_pages()` — fetch CEF page list
-- `wait_for_pages(timeout)` — poll until CEF is ready
-- `connect(host, port, path)` — WebSocket connection with error handling
+- Raw WebSocket client (no external dependencies)
+- CDP `Runtime.evaluate` wrapper with retry
+- Page discovery and polling
 
-### `xhr-hook.js` — XHR Hook (SharedJSContext)
+### `xhr-hook.js` — XHR Hook
 
-- Hook `XMLHttpRequest.prototype.open/send`
-- Intercept `ajaxgetadjacentpartnerevents?appid=1675200` responses
-- Use lazy getter (`Object.defineProperty`) to replace `responseText` and `response`
-- Replace Valve event titles, body, counts in `doReplace()`
-- **Never replace**: `gid`, `clan_steamid`, `forum_topic_id` (causes blank screen on expand)
-- Receives placeholder params: `/*SK_CLAN*/0`, `/*VISIBLE_GIDS*/[]`, filled by Python
+- Hooks `XMLHttpRequest.prototype.open/send`
+- Intercepts event API responses matching `target_appid`
+- Lazy getter replacement for `responseText` and `response`
+- Live-refreshes announcements on each intercepted request (with debounce)
+- Generation mechanism prevents stale hook stacking
 
-### `observer.js` — MutationObserver (BigPicture)
+### `observer.js` — MutationObserver
 
-- Watch DOM changes
-- Detect replaced cards (zero-width space `\u200B` marker in body)
-- Hide like/discuss button areas on replaced cards
+- Detects replaced cards via zero-width space marker
+- Hides vote/discuss areas in expanded card view only
+- Skips settings page layout (`DialogControlsSection`)
 
-### Sort order mechanism
+### Blacklist filter
 
-- Pre-fetch Valve events for two tag combos (`patchnotes` and `patchnotes,stablechannel`)
-- Build GID → rank map sorted by time descending
-- `doReplace` assigns idx from rank map, fallback counter for unknown GIDs
-
-### Abnormal announcement filtering
-
-- Python fetches community group page (`/announcements`)
-- Extract visible GIDs via regex `detail/(\d{10,})`
-- Pass to JS to filter `window.__skOurEvents`
-
-### Generation mechanism
-
-- Each deployment generates unique `GEN = Date.now()`
-- Old hooks detect `this.__skGen !== GEN` and skip
-- Prevents hook chain stacking
-
-## Key parameters
-
-- **Clan Account ID**: `46069703` (SkorionOS)
-- **Clan SteamID**: `103582791475591111`
-- **Valve AppID**: `1675200` (Steam Deck updates)
-- **CEF debug port**: `8080`
+- Python compares API announcements with community page
+- GIDs present in API but missing from page are blacklisted
+- Cached across network failures
 
 ## Usage
 
@@ -91,11 +112,14 @@ Install paths: `/usr/bin/gamemode-news-hook` and `/usr/lib/gamemode-news-hook/`
 # Manual mode (with forced navigation, for debugging)
 gamemode-news-hook
 
-# Auto mode (wait for CEF, skip navigation)
+# Daemon mode (wait for CEF, monitor, re-inject)
 gamemode-news-hook --auto
 
 # Debug mode (verbose logging)
 gamemode-news-hook --debug
+
+# Combined
+gamemode-news-hook --auto --debug
 ```
 
 ## Install
@@ -106,6 +130,7 @@ makepkg -si
 
 ## Notes
 
-- **Must restart gamescope** (`pkill gamescope`) after modifying hook logic, otherwise old hooks stack
-- Auto mode polls for CEF readiness (up to 120s)
-- Backup working versions before making changes
+- Must restart gamescope (`pkill gamescope`) after modifying hook logic, otherwise old hooks stack
+- Daemon mode monitors hook liveness and re-injects on Steam restart or JS context reset
+- `python-systemd` is optional; if installed, logs go to systemd journal
+- Config file changes take effect on next injection cycle (daemon mode) or next manual run
