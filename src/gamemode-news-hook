@@ -19,8 +19,8 @@ sys.path.insert(0, SCRIPT_DIR)
 
 import cef
 
-SK_CLAN = 46069703
-SK_CLAN_STEAMID = 103582791475591111
+SK_CLAN = int(os.environ.get("SK_CLAN", 46069703))
+SK_CLAN_STEAMID = (1 << 56) | (7 << 52) | SK_CLAN
 
 log = logging.getLogger("gamemode-news-hook")
 
