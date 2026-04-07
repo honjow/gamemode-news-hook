@@ -14,7 +14,7 @@
             var el = tw.currentNode.parentElement;
             if (!el) continue;
 
-            // Skip settings page layout to avoid hiding unrelated elements
+            // Skip settings page layout to avoid hiding unrelated elements / 跳过设置页布局，避免误隐藏无关元素
             var inSettingsLayout = false;
             for (var chk = el; chk; chk = chk.parentElement) {
                 if (chk.className && chk.className.indexOf('DialogControlsSection') !== -1) {
@@ -24,7 +24,7 @@
             }
             if (inSettingsLayout) continue;
 
-            // Walk up to find the body content div whose parent has 3+ children
+            // Walk up: parent with 3+ children, hide sibling vote/discuss panel / 向上查找父级含 3+ 子节点，隐藏相邻点赞/讨论区域
             for (var d = 0; d < 5 && el; d++) {
                 var parent = el.parentElement;
                 if (!parent || parent.children.length < 3) { el = parent; continue; }

@@ -1,8 +1,10 @@
 """
 CEF (Chromium Embedded Framework) remote debugging communication layer.
+CEF（Chromium 嵌入式框架）远程调试通信层。
 
 Provides raw WebSocket client and CDP (Chrome DevTools Protocol) helpers
 for injecting JavaScript into Steam's CEF pages.
+提供无依赖的 WebSocket 客户端与 CDP 辅助函数，用于向 Steam 的 CEF 页面注入 JavaScript。
 """
 
 import json
@@ -18,7 +20,8 @@ log = logging.getLogger("gamemode-news-hook")
 
 
 def ws_connect(host, port, path):
-    """Establish a raw WebSocket connection (no external dependencies)."""
+    """Establish a raw WebSocket connection (no external dependencies).
+    建立原始 WebSocket 连接（无第三方依赖）。"""
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.settimeout(10)
     s.connect((host, port))
@@ -33,6 +36,8 @@ def ws_connect(host, port, path):
 
 
 def ws_send(s, data):
+    """Send a masked WebSocket text frame (client → server).
+    发送一帧带掩码的 WebSocket 文本（客户端 → 服务端）。"""
     payload = data.encode()
     frame = bytearray([0x81])
     length = len(payload)
@@ -52,6 +57,8 @@ def ws_send(s, data):
 
 
 def ws_recv(s, timeout=15):
+    """Receive one WebSocket text frame from the server.
+    从服务端接收一帧 WebSocket 文本数据。"""
     s.settimeout(timeout)
     hdr = s.recv(2)
     length = hdr[1] & 0x7F
@@ -66,7 +73,8 @@ def ws_recv(s, timeout=15):
 
 
 def evaluate(ws, expression, retries=1):
-    """Evaluate JS expression via CDP Runtime.evaluate, with optional retry."""
+    """Evaluate JS expression via CDP Runtime.evaluate, with optional retry.
+    通过 CDP Runtime.evaluate 执行 JS 表达式，支持失败重试。"""
     for attempt in range(1 + retries):
         try:
             ws_send(ws, json.dumps({
@@ -88,6 +96,8 @@ def evaluate(ws, expression, retries=1):
 
 
 def _find_page(pages, keyword, host="localhost", port=8080):
+    """Find debugger WebSocket path by matching page title keyword.
+    根据页面标题关键字查找调试器 WebSocket 路径。"""
     for p in pages:
         if keyword in p.get("title", ""):
             ws_url = p["webSocketDebuggerUrl"]
@@ -99,7 +109,8 @@ def _find_page(pages, keyword, host="localhost", port=8080):
 
 
 def get_pages(host="localhost", port=8080):
-    """Fetch the CEF debug page list. Returns (sjc_path, bp_path) or raises."""
+    """Fetch the CEF debug page list. Returns (sjc_path, bp_path) or raises.
+    获取 CEF 调试页列表；返回 (SharedJSContext 路径, Big Picture 路径)，失败则抛错。"""
     conn = http.client.HTTPConnection(host, port, timeout=5)
     conn.request("GET", "/json")
     pages = json.loads(conn.getresponse().read())
@@ -109,7 +120,8 @@ def get_pages(host="localhost", port=8080):
 
 
 def wait_for_pages(timeout=120, host="localhost", port=8080):
-    """Poll CEF debug port until SharedJSContext and BigPicture are ready."""
+    """Poll CEF debug port until SharedJSContext and BigPicture are ready.
+    轮询 CEF 调试端口，直到 SharedJSContext 与 Big Picture 页面就绪。"""
     deadline = time.time() + timeout
     while time.time() < deadline:
         try:
@@ -124,7 +136,8 @@ def wait_for_pages(timeout=120, host="localhost", port=8080):
 
 
 def connect(host, port, path):
-    """Connect to a CEF page via WebSocket with error handling."""
+    """Connect to a CEF page via WebSocket with error handling.
+    通过 WebSocket 连接指定 CEF 页面，含错误处理。"""
     try:
         return ws_connect(host, port, path)
     except Exception as e:

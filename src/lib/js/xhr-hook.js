@@ -55,7 +55,7 @@
         }
     }
 
-    // ── Initial fetch with filter ──
+    // Initial fetch with filter / 带黑名单过滤的首次拉取
     var initEvents = fetchOurEvents(true);
     if (!initEvents || initEvents.length === 0)
         return JSON.stringify({error: 'failed to fetch our events'});
@@ -64,7 +64,7 @@
     window.__skOurTitle = initEvents[0].event_name;
     window.__skLastRefresh = Date.now();
 
-    // ── Pre-fetch Valve frontpage events for sort order ──
+    // Pre-fetch Valve frontpage events for sort order / 预取 Valve 前台活动以确定排序
     var screenGids = [];
     var screenSeen = {};
     var tagSets = ['&require_tags=patchnotes', '&require_tags=patchnotes,stablechannel'];
@@ -105,7 +105,7 @@
     window.__skTargetCount = 0;
     window.__skOrderLocked = false;
 
-    // ── Generation mechanism: invalidate stale hooks ──
+    // Generation mechanism: invalidate stale hooks / 代际标记：使旧钩子失效，避免重复叠加
     var GEN = Date.now();
     window.__skGen = GEN;
 
@@ -116,7 +116,7 @@
     var origGetter_r = Object.getOwnPropertyDescriptor(
         XMLHttpRequest.prototype, 'response');
 
-    // ── open override: tag matching requests ──
+    // open override: tag matching requests / 重写 open：标记需拦截的请求
     XMLHttpRequest.prototype.open = function(method, url) {
         this.__skUrl = String(url);
         this.__skGen = window.__skGen;
@@ -131,7 +131,7 @@
         return origOpen.apply(this, arguments);
     };
 
-    // ── doReplace: core replacement logic ──
+    // doReplace: core replacement logic / 核心：将响应中的目标活动替换为社区公告
     function doReplace(rawText) {
         try {
             var orig = JSON.parse(rawText);
@@ -208,7 +208,7 @@
         }
     }
 
-    // ── send override: install lazy getter on matching XHRs ──
+    // send override: lazy getters on matching XHRs / 重写 send：对匹配的 XHR 安装惰性 getter 替换响应
     XMLHttpRequest.prototype.send = function() {
         if (!this.__skTarget || this.__skGen !== GEN) return origSend.apply(this, arguments);
 

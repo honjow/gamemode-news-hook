@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """
 gamemode-news-hook — Replace Steam Game Mode update cards with community announcements.
+gamemode-news-hook — 将 Steam 游戏模式（大屏）的更新卡片替换为社区组公告。
 
 Injects JS into Steam's CEF pages via remote debugging protocol to replace
 Valve event cards with custom community group announcements.
+通过 CEF 远程调试向 Steam 页面注入 JavaScript，用自定义社区组公告替换 Valve 活动卡片。
 """
 
 import json
@@ -39,7 +41,8 @@ _last_hidden_gids = []
 
 
 def load_config():
-    """Load config from file, with env var overrides. Returns a dict."""
+    """Load config from file, with env var overrides. Returns a dict.
+    从配置文件加载设置，环境变量可覆盖；返回字典。"""
     cfg = dict(DEFAULTS)
 
     parser = configparser.ConfigParser()
@@ -100,7 +103,9 @@ def read_js(filename):
 
 def fetch_hidden_gids(cfg):
     """Build blacklist: GIDs in API but not on community page.
-    Falls back to cached result on failure."""
+    Falls back to cached result on failure.
+    构建黑名单：出现在 API 但不在社区公告页的 GID。
+    请求失败时回退到上次缓存结果。"""
     global _last_hidden_gids
     try:
         api_url = (
@@ -132,7 +137,8 @@ def fetch_hidden_gids(cfg):
 
 
 def inject(cfg, sjc_path, bp_path, hidden_gids, navigate=False):
-    """Inject XHR hook and observer into CEF pages."""
+    """Inject XHR hook and observer into CEF pages.
+    向 CEF 页面注入 XHR 钩子与 MutationObserver。"""
     host, port = cfg["cef_host"], cfg["cef_port"]
 
     log.info("Injecting XHR hook into SharedJSContext...")
@@ -169,7 +175,9 @@ def inject(cfg, sjc_path, bp_path, hidden_gids, navigate=False):
 
 def monitor_cef(cfg, sjc_path):
     """Poll hook liveness via __skGen. Returns when hook is gone or CEF is down.
-    Retries a few times before declaring dead to avoid false positives."""
+    Retries a few times before declaring dead to avoid false positives.
+    通过 __skGen 轮询钩子是否存活；钩子丢失或 CEF 不可达时返回。
+    连续失败多次才判定断开，减少误判。"""
     host, port = cfg["cef_host"], cfg["cef_port"]
     interval = cfg["monitor_interval"]
     fail_count = 0
@@ -231,7 +239,7 @@ def main():
         log.info("Done.")
         return
 
-    # Daemon mode
+    # Daemon mode / 守护进程模式：等待 CEF、注入、监控并重注入
     while not _shutdown:
         log.info("Waiting for Steam CEF...")
         sjc_path, bp_path = cef.wait_for_pages(host=cfg["cef_host"], port=cfg["cef_port"])
