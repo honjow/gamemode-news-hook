@@ -251,10 +251,38 @@
         return origSend.apply(this, arguments);
     };
 
+    // Flush PartnerEventStore cache for TARGET_APPID so stale entries
+    // don't survive across re-injections (MobX ObservableMap).
+    var storeCleared = 0;
+    try {
+        if (typeof g_PartnerEventStore !== 'undefined' && g_PartnerEventStore.m_mapExistingEvents) {
+            var evMap = g_PartnerEventStore.m_mapExistingEvents;
+            var evData = evMap.data_;
+            if (evData) {
+                var toDelete = [];
+                evData.forEach(function(v, k) {
+                    var val = v && v.value_ !== undefined ? v.value_ : v;
+                    if (val && val.appid === TARGET_APPID) toDelete.push(k);
+                });
+                for (var di = 0; di < toDelete.length; di++) evMap.delete(toDelete[di]);
+                storeCleared = toDelete.length;
+            }
+            var appMap = g_PartnerEventStore.m_mapAppIDToGIDs;
+            if (appMap && appMap.delete) {
+                appMap.delete(TARGET_APPID);
+                appMap.delete(String(TARGET_APPID));
+            }
+            window.__skXhrLog.push('store:cleared ' + storeCleared + ' cached events');
+        }
+    } catch(e) {
+        window.__skXhrLog.push('store:clear error ' + e.message);
+    }
+
     return JSON.stringify({
         ok: true,
         version: VERSION,
         events: initEvents.length,
-        title: initEvents[0].event_name
+        title: initEvents[0].event_name,
+        storeCleared: storeCleared
     });
 })()

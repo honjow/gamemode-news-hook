@@ -74,6 +74,12 @@ def load_config():
     cfg["refresh_debounce"] = int(cfg["refresh_debounce"])
     cfg["clan_steamid"] = (1 << 56) | (7 << 52) | cfg["clan_id"]
 
+    cfg["lang_map"] = {}
+    if parser.has_section("lang_map"):
+        for lang, cid in parser.items("lang_map"):
+            cfg["lang_map"][lang] = int(cid)
+        log.debug("Loaded lang_map: %s", cfg["lang_map"])
+
     return cfg
 
 
@@ -101,9 +107,10 @@ def read_js(filename):
         return f.read()
 
 
-def detect_lang_list(cfg, sjc_path):
-    """Detect Steam UI language via CEF and build lang_list string.
-    通过 CEF 检测 Steam 界面语言，构造 lang_list 字符串。"""
+def detect_steam_language(cfg, sjc_path):
+    """Detect Steam UI language via CEF.
+    Returns (lang_name, lang_id) or (None, None) on failure.
+    通过 CEF 检测 Steam 界面语言，返回 (语言名, 语言 ID)。"""
     host, port = cfg["cef_host"], cfg["cef_port"]
     try:
         ws = cef.connect(host, port, sjc_path)
@@ -121,17 +128,33 @@ def detect_lang_list(cfg, sjc_path):
             if result:
                 data = json.loads(result)
                 lang_id = data.get("id")
-                lang_name = data.get("lang", "?")
-                if lang_id is not None:
-                    lang_list = str(lang_id) if lang_id == 0 else f"{lang_id}_0"
-                    log.info("Detected Steam language: %s (id=%d), lang_list=%s",
-                             lang_name, lang_id, lang_list)
-                    return lang_list
+                lang_name = data.get("lang")
+                if lang_id is not None and lang_name:
+                    log.info("Detected Steam language: %s (id=%d)", lang_name, lang_id)
+                    return lang_name, lang_id
         finally:
             ws.close()
     except Exception as e:
         log.warning("Failed to detect Steam language: %s", e)
-    return "0"
+    return None, None
+
+
+def apply_detected_language(cfg, sjc_path):
+    """Detect Steam language and update cfg with lang_list and lang_map clan_id.
+    检测 Steam 语言，更新 cfg 中的 lang_list，并根据 lang_map 切换 clan_id。"""
+    lang_name, lang_id = detect_steam_language(cfg, sjc_path)
+    if lang_name is None:
+        cfg["lang_list"] = "0"
+        return
+
+    cfg["lang_list"] = str(lang_id) if lang_id == 0 else f"{lang_id}_0"
+    log.info("lang_list=%s", cfg["lang_list"])
+
+    lang_map = cfg.get("lang_map", {})
+    if lang_name in lang_map:
+        cfg["clan_id"] = lang_map[lang_name]
+        cfg["clan_steamid"] = (1 << 56) | (7 << 52) | cfg["clan_id"]
+        log.info("lang_map matched: %s -> clan_id=%d", lang_name, cfg["clan_id"])
 
 
 def fetch_hidden_gids(cfg):
@@ -169,22 +192,29 @@ def fetch_hidden_gids(cfg):
         return []
 
 
+def _build_xhr_hook_js(cfg, hidden_gids):
+    """Build the parameterized XHR hook JS string.
+    构造参数化的 XHR 钩子 JS 字符串。"""
+    js = read_js("xhr-hook.js")
+    js = js.replace("/*SK_CLAN*/0", str(cfg["clan_id"]))
+    js = js.replace("/*HIDDEN_GIDS*/[]", json.dumps(hidden_gids))
+    js = js.replace("/*TARGET_APPID*/1675200", str(cfg["target_appid"]))
+    js = js.replace("/*LANG_LIST*/'6_0'", f"'{cfg['lang_list']}'")
+    js = js.replace("/*REFRESH_DEBOUNCE*/10000", str(cfg["refresh_debounce"] * 1000))
+    return js
+
+
 def inject(cfg, sjc_path, bp_path, hidden_gids, navigate=False):
     """Inject XHR hook and observer into CEF pages.
     向 CEF 页面注入 XHR 钩子与 MutationObserver。"""
     host, port = cfg["cef_host"], cfg["cef_port"]
+    xhr_js = _build_xhr_hook_js(cfg, hidden_gids)
 
     log.info("Injecting XHR hook into SharedJSContext...")
     ws_sjc = cef.connect(host, port, sjc_path)
     try:
-        js = read_js("xhr-hook.js")
-        js = js.replace("/*SK_CLAN*/0", str(cfg["clan_id"]))
-        js = js.replace("/*HIDDEN_GIDS*/[]", json.dumps(hidden_gids))
-        js = js.replace("/*TARGET_APPID*/1675200", str(cfg["target_appid"]))
-        js = js.replace("/*LANG_LIST*/'6_0'", f"'{cfg['lang_list']}'")
-        js = js.replace("/*REFRESH_DEBOUNCE*/10000", str(cfg["refresh_debounce"] * 1000))
-        result = cef.evaluate(ws_sjc, js)
-        log.info("XHR hook result: %s", result)
+        result = cef.evaluate(ws_sjc, xhr_js)
+        log.info("XHR hook result (SJC): %s", result)
         if navigate:
             log.info("Navigating library -> settings...")
             cef.evaluate(ws_sjc, "SteamClient.URL.ExecuteSteamURL('steam://open/library')")
@@ -196,9 +226,11 @@ def inject(cfg, sjc_path, bp_path, hidden_gids, navigate=False):
     finally:
         ws_sjc.close()
 
-    log.info("Injecting MutationObserver into BigPicture...")
+    log.info("Injecting XHR hook + MutationObserver into BigPicture...")
     ws_bp = cef.connect(host, port, bp_path)
     try:
+        result = cef.evaluate(ws_bp, xhr_js)
+        log.info("XHR hook result (BP): %s", result)
         js = read_js("observer.js")
         result = cef.evaluate(ws_bp, js)
         log.info("Observer result: %s", result)
@@ -268,7 +300,7 @@ def main():
             log.error("Required CEF pages not found (SharedJSContext / BigPicture)")
             sys.exit(1)
         if cfg["lang_list"] == "auto":
-            cfg["lang_list"] = detect_lang_list(cfg, sjc_path)
+            apply_detected_language(cfg, sjc_path)
         hidden_gids = fetch_hidden_gids(cfg)
         inject(cfg, sjc_path, bp_path, hidden_gids, navigate=True)
         log.info("Done.")
@@ -276,6 +308,7 @@ def main():
 
     # Daemon mode / 守护进程模式：等待 CEF、注入、监控并重注入
     auto_lang = cfg["lang_list"] == "auto"
+    orig_clan_id = cfg["clan_id"]
     while not _shutdown:
         log.info("Waiting for Steam CEF...")
         sjc_path, bp_path = cef.wait_for_pages(host=cfg["cef_host"], port=cfg["cef_port"])
@@ -284,7 +317,9 @@ def main():
             continue
 
         if auto_lang:
-            cfg["lang_list"] = detect_lang_list(cfg, sjc_path)
+            cfg["clan_id"] = orig_clan_id
+            cfg["clan_steamid"] = (1 << 56) | (7 << 52) | orig_clan_id
+            apply_detected_language(cfg, sjc_path)
         hidden_gids = fetch_hidden_gids(cfg)
         try:
             inject(cfg, sjc_path, bp_path, hidden_gids)
