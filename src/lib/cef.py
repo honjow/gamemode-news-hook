@@ -15,6 +15,7 @@ import os
 import socket
 import time
 import logging
+from urllib.parse import unquote
 
 log = logging.getLogger("gamemode-news-hook")
 
@@ -95,17 +96,90 @@ def evaluate(ws, expression, retries=1):
                 raise
 
 
+def _page_ws_path(p, host="localhost", port=8080):
+    """WebSocket path for a /json page entry (for CDP connect).
+    /json 条目的 WebSocket 路径（供 CDP 连接）。"""
+    ws_url = p.get("webSocketDebuggerUrl")
+    if not ws_url:
+        return None
+    prefix = f"ws://{host}:{port}"
+    if ws_url.startswith(prefix):
+        return ws_url[len(prefix):]
+    return ws_url.split("/devtools", 1)[-1]
+
+
+def _is_gamepad_main_shell_url(url):
+    """True for new BPM main CEF page; does not depend on localized window title.
+    新手柄大屏主壳（与界面语言无关）。弹层为 browserviewpopup=1，需排除。"""
+    if not url or "browserviewpopup=1" in url:
+        return False
+    # e.g. useragent=Valve%20Steam%20Gamepad (verified on remote /json)
+    low = unquote(url.replace("+", " ")).lower()
+    return "steam gamepad" in low
+
+
+def _steamloopback_pages(pages, host, port):
+    """Entries whose URL is on steamloopback.host (SharedJSContext lives here; BPM uses about:blank).
+    steamloopback.host 上的页（SharedJSContext）；大屏主壳为 about:blank，与此不重叠。"""
+    out = []
+    for p in pages:
+        if p.get("type") in ("service_worker", "background_page"):
+            continue
+        url = (p.get("url") or "").lower()
+        if "steamloopback.host" in url:
+            path = _page_ws_path(p, host, port)
+            if path:
+                out.append((p, path))
+    return out
+
+
+def _find_shared_js_context_page(pages, host="localhost", port=8080):
+    """SharedJSContext for XHR hook: prefer steamloopback.host URL, then title.
+    优先 steamloopback.host（与界面语言无关），多开时用标题消歧，最后标题回退。"""
+    loop = _steamloopback_pages(pages, host, port)
+    if len(loop) == 1:
+        log.debug("SharedJSContext matched by unique steamloopback.host page")
+        return loop[0][1]
+    if len(loop) > 1:
+        for p, path in loop:
+            if "SharedJSContext" in (p.get("title") or ""):
+                log.debug("SharedJSContext matched among steamloopback pages (title)")
+                return path
+        log.warning("Multiple steamloopback CEF pages; using first")
+        return loop[0][1]
+    path = _find_page(pages, "SharedJSContext", host, port)
+    if path:
+        log.debug("SharedJSContext matched by title fallback")
+    return path
+
+
 def _find_page(pages, keyword, host="localhost", port=8080):
     """Find debugger WebSocket path by matching page title keyword.
     根据页面标题关键字查找调试器 WebSocket 路径。"""
     for p in pages:
         if keyword in p.get("title", ""):
-            ws_url = p["webSocketDebuggerUrl"]
-            prefix = f"ws://{host}:{port}"
-            if ws_url.startswith(prefix):
-                return ws_url[len(prefix):]
-            return ws_url.split("/devtools", 1)[-1]
+            path = _page_ws_path(p, host, port)
+            if path:
+                return path
     return None
+
+
+def _find_big_picture_page(pages, host="localhost", port=8080):
+    """Big Picture / gamepad UI: URL heuristic first, then title (legacy / old clients).
+    大屏页：优先 URL（与语言无关），再回退标题。"""
+    for p in pages:
+        if p.get("type") in ("service_worker", "background_page"):
+            continue
+        url = p.get("url") or ""
+        if _is_gamepad_main_shell_url(url):
+            path = _page_ws_path(p, host, port)
+            if path:
+                log.debug("Big Picture matched by URL (Steam Gamepad shell)")
+                return path
+    bp = _find_page(pages, "大屏幕", host, port) or _find_page(pages, "Big Picture", host, port)
+    if bp:
+        log.debug("Big Picture matched by title fallback")
+    return bp
 
 
 def get_pages(host="localhost", port=8080):
@@ -114,8 +188,8 @@ def get_pages(host="localhost", port=8080):
     conn = http.client.HTTPConnection(host, port, timeout=5)
     conn.request("GET", "/json")
     pages = json.loads(conn.getresponse().read())
-    sjc = _find_page(pages, "SharedJSContext", host, port)
-    bp = _find_page(pages, "大屏幕", host, port) or _find_page(pages, "Big Picture", host, port)
+    sjc = _find_shared_js_context_page(pages, host, port)
+    bp = _find_big_picture_page(pages, host, port)
     return sjc, bp
 
 
