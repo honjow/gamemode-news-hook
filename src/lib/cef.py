@@ -73,14 +73,17 @@ def ws_recv(s, timeout=15):
     return buf.decode()
 
 
-def evaluate(ws, expression, retries=1):
+def evaluate(ws, expression, retries=1, await_promise=False):
     """Evaluate JS expression via CDP Runtime.evaluate, with optional retry.
     通过 CDP Runtime.evaluate 执行 JS 表达式，支持失败重试。"""
     for attempt in range(1 + retries):
         try:
+            params = {"expression": expression, "returnByValue": True}
+            if await_promise:
+                params["awaitPromise"] = True
             ws_send(ws, json.dumps({
                 "id": 1, "method": "Runtime.evaluate",
-                "params": {"expression": expression, "returnByValue": True}
+                "params": params
             }))
             r = json.loads(ws_recv(ws)).get("result", {}).get("result", {})
             if r.get("subtype") == "error":

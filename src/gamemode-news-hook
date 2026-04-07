@@ -32,7 +32,7 @@ DEFAULTS = {
     "target_appid": "1675200",
     "cef_host": "localhost",
     "cef_port": "8080",
-    "lang_list": "6_0",
+    "lang_list": "auto",
     "monitor_interval": "10",
     "refresh_debounce": "10",
 }
@@ -99,6 +99,39 @@ def read_js(filename):
     path = os.path.join(SCRIPT_DIR, "js", filename)
     with open(path, "r", encoding="utf-8") as f:
         return f.read()
+
+
+def detect_lang_list(cfg, sjc_path):
+    """Detect Steam UI language via CEF and build lang_list string.
+    通过 CEF 检测 Steam 界面语言，构造 lang_list 字符串。"""
+    host, port = cfg["cef_host"], cfg["cef_port"]
+    try:
+        ws = cef.connect(host, port, sjc_path)
+        try:
+            result = cef.evaluate(ws, """
+                (async function() {
+                    var lang = await SteamClient.Settings.GetCurrentLanguage();
+                    var langs = await SteamClient.Settings.GetAvailableLanguages();
+                    var map = {};
+                    for (var i = 0; i < langs.length; i++)
+                        map[langs[i].strShortName] = langs[i].language;
+                    return JSON.stringify({lang: lang, id: map[lang]});
+                })()
+            """, await_promise=True)
+            if result:
+                data = json.loads(result)
+                lang_id = data.get("id")
+                lang_name = data.get("lang", "?")
+                if lang_id is not None:
+                    lang_list = str(lang_id) if lang_id == 0 else f"{lang_id}_0"
+                    log.info("Detected Steam language: %s (id=%d), lang_list=%s",
+                             lang_name, lang_id, lang_list)
+                    return lang_list
+        finally:
+            ws.close()
+    except Exception as e:
+        log.warning("Failed to detect Steam language: %s", e)
+    return "0"
 
 
 def fetch_hidden_gids(cfg):
@@ -234,12 +267,15 @@ def main():
         if not sjc_path or not bp_path:
             log.error("Required CEF pages not found (SharedJSContext / BigPicture)")
             sys.exit(1)
+        if cfg["lang_list"] == "auto":
+            cfg["lang_list"] = detect_lang_list(cfg, sjc_path)
         hidden_gids = fetch_hidden_gids(cfg)
         inject(cfg, sjc_path, bp_path, hidden_gids, navigate=True)
         log.info("Done.")
         return
 
     # Daemon mode / 守护进程模式：等待 CEF、注入、监控并重注入
+    auto_lang = cfg["lang_list"] == "auto"
     while not _shutdown:
         log.info("Waiting for Steam CEF...")
         sjc_path, bp_path = cef.wait_for_pages(host=cfg["cef_host"], port=cfg["cef_port"])
@@ -247,6 +283,8 @@ def main():
             log.warning("CEF wait timed out, retrying...")
             continue
 
+        if auto_lang:
+            cfg["lang_list"] = detect_lang_list(cfg, sjc_path)
         hidden_gids = fetch_hidden_gids(cfg)
         try:
             inject(cfg, sjc_path, bp_path, hidden_gids)
