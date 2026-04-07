@@ -33,7 +33,7 @@ DEFAULTS = {
     "cef_host": "localhost",
     "cef_port": "8080",
     "lang_list": "auto",
-    "monitor_interval": "10",
+    "monitor_interval": "5",
     "refresh_debounce": "10",
 }
 
@@ -246,7 +246,7 @@ def monitor_cef(cfg, sjc_path):
     host, port = cfg["cef_host"], cfg["cef_port"]
     interval = cfg["monitor_interval"]
     fail_count = 0
-    max_failures = 3
+    max_failures = 2
 
     while not _shutdown:
         time.sleep(interval)

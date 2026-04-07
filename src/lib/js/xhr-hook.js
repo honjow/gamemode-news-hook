@@ -278,11 +278,77 @@
         window.__skXhrLog.push('store:clear error ' + e.message);
     }
 
+    // Patch stale event data already rendered in BigPicture's React tree.
+    // Uses semantic DOM attributes (role="button") + React fiber inspection
+    // instead of fragile minified CSS class names.
+    var bpPatched = 0;
+    function patchBPEvents() {
+        var ours = window.__skOurEvents;
+        if (!ours || !ours.length || !document.body) return;
+
+        var buttons = document.querySelectorAll('[role="button"]');
+        for (var bi = 0; bi < buttons.length; bi++) {
+            var el = buttons[bi];
+            var fiberKey = null;
+            var elKeys = Object.keys(el);
+            for (var ki = 0; ki < elKeys.length; ki++) {
+                if (elKeys[ki].indexOf('__reactFiber') === 0) { fiberKey = elKeys[ki]; break; }
+            }
+            if (!fiberKey) continue;
+
+            var cur = el[fiberKey];
+            for (var fd = 0; fd < 10 && cur; fd++, cur = cur.return) {
+                var ev = cur.memoizedProps && cur.memoizedProps.event;
+                if (!ev || ev.appid !== TARGET_APPID) continue;
+                if (!ev.name || !ev.name.data_) break;
+
+                var nameData = ev.name.data_;
+                var firstNameVal = null;
+                var langKey = null;
+                nameData.forEach(function(v, k) {
+                    if (firstNameVal === null) {
+                        firstNameVal = v && v.value_ !== undefined ? v.value_ : v;
+                        langKey = k;
+                    }
+                });
+                if (!firstNameVal || firstNameVal.charCodeAt(0) === 0x200B) break;
+
+                var gid = ev.GID;
+                var entry = window.__skTargetGids && window.__skTargetGids[gid];
+                var src = entry ? ours[entry.idx] : ours[0];
+                if (!src) break;
+
+                var newName = src.event_name || '';
+                var rawBody = (src.announcement_body && src.announcement_body.body) || '';
+                var firstLine = rawBody.split(/[\r\n]+/)[0]
+                    .replace(/\[\/?\w+[^\]]*\]/g, '').trim();
+
+                ev.name.set(langKey, '\u200B' + (firstLine || newName));
+                if (ev.description && ev.description.set) {
+                    ev.description.set(langKey, '\u200B' + rawBody);
+                }
+                bpPatched++;
+                window.__skXhrLog.push('bp-patch:gid=' + gid + ' -> ' + newName);
+                break;
+            }
+        }
+    }
+
+    if (typeof document !== 'undefined' && document.body) {
+        patchBPEvents();
+        var bpObs = new MutationObserver(function() {
+            if (window.__skGen !== GEN) { bpObs.disconnect(); return; }
+            patchBPEvents();
+        });
+        bpObs.observe(document.body, { childList: true, subtree: true });
+    }
+
     return JSON.stringify({
         ok: true,
         version: VERSION,
         events: initEvents.length,
         title: initEvents[0].event_name,
-        storeCleared: storeCleared
+        storeCleared: storeCleared,
+        bpPatched: bpPatched
     });
 })()
