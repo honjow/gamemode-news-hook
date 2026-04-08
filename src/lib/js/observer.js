@@ -1,7 +1,7 @@
 (function() {
     if (window.__skObserver) window.__skObserver.disconnect();
 
-    var VERSION = '1.1.3';
+    var VERSION = '1.2.0';
     var SK_MARKER = '\u200B';
     var patchedCount = 0;
 

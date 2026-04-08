@@ -9,7 +9,7 @@
     var REPO_MIRRORS = /*REPO_MIRRORS*/[];
     var DETECTED_LANG = /*DETECTED_LANG*/'';
     var PREFETCHED_EVENTS = /*PREFETCHED_EVENTS*/null;
-    var VERSION = '1.1.3';
+    var VERSION = '1.2.0';
     window.__skXhrLog = [];
     window.__skVersion = VERSION;
 
