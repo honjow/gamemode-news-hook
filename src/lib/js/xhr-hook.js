@@ -6,6 +6,8 @@
     var REFRESH_DEBOUNCE = /*REFRESH_DEBOUNCE*/10000;
     var CHANNEL_PREFIX = /*CHANNEL_PREFIX*/{};
     var CURRENT_BRANCH = /*CURRENT_BRANCH*/'';
+    var REPO_MIRRORS = /*REPO_MIRRORS*/[];
+    var DETECTED_LANG = /*DETECTED_LANG*/'';
     var PREFETCHED_EVENTS = /*PREFETCHED_EVENTS*/null;
     var VERSION = '1.1.3';
     window.__skXhrLog = [];
@@ -13,12 +15,84 @@
 
     var TARGET_APPID_STR = 'appid=' + TARGET_APPID;
 
-    function fetchOurEvents(applyFilter) {
-        if (PREFETCHED_EVENTS) {
-            window.__skXhrLog.push('prefetched:' + PREFETCHED_EVENTS.length + ' events');
-            return PREFETCHED_EVENTS;
+    function parseRepoJSON(raw) {
+        if (!raw || raw.length === 0) return null;
+        var channelOk = [];
+        for (var i = 0; i < raw.length; i++) {
+            var entry = raw[i];
+            if (entry.channel && CURRENT_BRANCH && entry.channel !== CURRENT_BRANCH) continue;
+            channelOk.push(entry);
         }
+        var filtered = [];
+        var englishFallback = [];
+        for (var i = 0; i < channelOk.length; i++) {
+            var entry = channelOk[i];
+            if (!entry.lang) { filtered.push(entry); englishFallback.push(entry); continue; }
+            if (DETECTED_LANG && entry.lang === DETECTED_LANG) filtered.push(entry);
+            if (entry.lang === 'english') englishFallback.push(entry);
+        }
+        if (filtered.length === 0) filtered = englishFallback;
+        window.__skXhrLog.push('repo:' + raw.length + '->' + filtered.length
+            + ' (lang=' + DETECTED_LANG + ',branch=' + CURRENT_BRANCH + ')');
 
+        var now = Math.floor(Date.now() / 1000);
+        var events = [];
+        for (var j = 0; j < filtered.length; j++) {
+            var e = filtered[j];
+            var gid = String(1000000000 + j);
+            var ts = e.timestamp || (now - j * 3600);
+            events.push({
+                gid: gid,
+                event_name: e.title || '',
+                event_type: 12,
+                appid: TARGET_APPID,
+                rtime32_start_time: ts,
+                rtime32_last_modified: ts,
+                votes_up: 0, votes_down: 0, comment_count: 0,
+                announcement_body: {
+                    gid: gid,
+                    headline: e.title || '',
+                    body: e.bbcode_body || e.body || '',
+                    posttime: ts,
+                    updatetime: ts
+                }
+            });
+        }
+        return events.length > 0 ? events : null;
+    }
+
+    function refreshRepoAsync() {
+        var mirrorIdx = 0;
+        function tryNext() {
+            if (mirrorIdx >= REPO_MIRRORS.length) return;
+            var x = new XMLHttpRequest();
+            x.open('GET', REPO_MIRRORS[mirrorIdx], true);
+            x.timeout = 10000;
+            x.onload = function() {
+                if (x.status === 200) {
+                    try {
+                        var events = parseRepoJSON(JSON.parse(x.responseText));
+                        if (events && events.length > 0) {
+                            window.__skOurEvents = events;
+                            window.__skOurTitle = events[0].event_name;
+                            window.__skTargetGids = {};
+                            window.__skTargetCount = 0;
+                            window.__skNextFallbackIdx = Object.keys(window.__skValveRank || {}).length;
+                            window.__skXhrLog.push('repo-refresh:' + events.length + ' events');
+                        }
+                    } catch(e) {}
+                } else {
+                    mirrorIdx++;
+                    tryNext();
+                }
+            };
+            x.onerror = x.ontimeout = function() { mirrorIdx++; tryNext(); };
+            x.send();
+        }
+        tryNext();
+    }
+
+    function fetchSteamEvents(applyFilter) {
         var resp = null;
         try {
             var x = new XMLHttpRequest();
@@ -66,11 +140,16 @@
         return resp.events;
     }
 
+    function fetchOurEvents(applyFilter) {
+        if (PREFETCHED_EVENTS) return parseRepoJSON(PREFETCHED_EVENTS);
+        return fetchSteamEvents(applyFilter);
+    }
+
     function refreshEvents() {
-        if (PREFETCHED_EVENTS) return;
         var now = Date.now();
         if (window.__skLastRefresh && (now - window.__skLastRefresh) < REFRESH_DEBOUNCE) return;
         window.__skLastRefresh = now;
+        if (REPO_MIRRORS.length > 0) { refreshRepoAsync(); return; }
         var events = fetchOurEvents(true);
         if (events && events.length > 0) {
             window.__skOurEvents = events;

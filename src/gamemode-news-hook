@@ -38,8 +38,6 @@ DEFAULTS = {
     "refresh_debounce": "10",
 }
 
-_repo_cache = None
-
 _last_hidden_gids = []
 
 
@@ -196,108 +194,19 @@ def apply_detected_language(cfg, sjc_path):
         log.info("lang_map matched: %s -> clan_id=%d", lang_name, cfg["clan_id"])
 
 
-def md_to_bbcode(text):
-    """Convert basic Markdown to Steam BBCode."""
-    lines = text.split("\n")
-    result = []
-    in_list = False
-    for line in lines:
-        stripped = line.strip()
-
-        if re.match(r"^[-*]\s+", stripped):
-            item = re.sub(r"^[-*]\s+", "", stripped)
-            if not in_list:
-                result.append("[list]")
-                in_list = True
-            result.append(f"[*] {item}")
-            continue
-        elif in_list:
-            result.append("[/list]")
-            in_list = False
-
-        # headings
-        m = re.match(r"^(#{1,3})\s+(.*)", stripped)
-        if m:
-            level = len(m.group(1))
-            tag = f"h{level}"
-            result.append(f"[{tag}]{m.group(2)}[/{tag}]")
-            continue
-
-        result.append(stripped)
-
-    if in_list:
-        result.append("[/list]")
-
-    text = "\n".join(result)
-    text = re.sub(r"\*\*(.+?)\*\*", r"[b]\1[/b]", text)
-    text = re.sub(r"\*(.+?)\*", r"[i]\1[/i]", text)
-    text = re.sub(r"~~(.+?)~~", r"[strike]\1[/strike]", text)
-    text = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r"[url=\2]\1[/url]", text)
-    return text
-
-
 def fetch_repo_announcements(cfg):
-    """Fetch announcements.json from repo mirrors, filter by lang/channel,
-    convert Markdown to BBCode, and return a list of Steam-event-compatible dicts.
-    Falls back to cache on failure."""
-    global _repo_cache
-    raw = None
+    """Fetch announcements.json from repo mirrors. Returns raw JSON list.
+    JS side handles filtering and event construction."""
     for url in cfg.get("repo_mirrors", []):
         try:
             resp = urllib.request.urlopen(url, timeout=15)
             raw = json.loads(resp.read().decode("utf-8"))
             log.info("Fetched announcements from %s: %d entries", url, len(raw))
-            break
+            return raw
         except Exception as e:
             log.warning("Mirror failed %s: %s", url, e)
-
-    if raw is None:
-        if _repo_cache is not None:
-            log.info("Using cached repo announcements (%d entries)", len(_repo_cache))
-            return _repo_cache
-        log.error("All repo mirrors failed, no cache available")
-        return []
-
-    lang = cfg.get("detected_lang_name", "")
-    branch = cfg.get("current_branch", "")
-    filtered = []
-    for entry in raw:
-        el = entry.get("lang", "")
-        if el and lang and el != lang:
-            continue
-        ec = entry.get("channel", "")
-        if ec and branch and ec != branch:
-            continue
-        filtered.append(entry)
-
-    log.info("Filtered %d -> %d (lang=%s, branch=%s)", len(raw), len(filtered), lang, branch)
-
-    now = int(time.time())
-    events = []
-    for i, entry in enumerate(filtered):
-        body_bbcode = md_to_bbcode(entry.get("body", ""))
-        gid = str(1000000000 + i)
-        events.append({
-            "gid": gid,
-            "event_name": entry.get("title", ""),
-            "event_type": 12,
-            "appid": cfg["target_appid"],
-            "rtime32_start_time": now - i * 3600,
-            "rtime32_last_modified": now - i * 3600,
-            "votes_up": 0,
-            "votes_down": 0,
-            "comment_count": 0,
-            "announcement_body": {
-                "gid": gid,
-                "headline": entry.get("title", ""),
-                "body": body_bbcode,
-                "posttime": now - i * 3600,
-                "updatetime": now - i * 3600,
-            },
-        })
-
-    _repo_cache = events
-    return events
+    log.error("All repo mirrors failed")
+    return []
 
 
 def fetch_hidden_gids(cfg):
@@ -346,6 +255,8 @@ def _build_xhr_hook_js(cfg, hidden_gids):
     js = js.replace("/*REFRESH_DEBOUNCE*/10000", str(cfg["refresh_debounce"] * 1000))
     js = js.replace("/*CHANNEL_PREFIX*/{}", json.dumps(cfg.get("channel_prefix", {})))
     js = js.replace("/*CURRENT_BRANCH*/''", f"'{cfg.get('current_branch', '')}'")
+    js = js.replace("/*REPO_MIRRORS*/[]", json.dumps(cfg.get("repo_mirrors", [])))
+    js = js.replace("/*DETECTED_LANG*/''", f"'{cfg.get('detected_lang_name', '')}'")
     prefetched = cfg.get("prefetched_events")
     if prefetched is not None:
         js = js.replace("/*PREFETCHED_EVENTS*/null", json.dumps(prefetched, ensure_ascii=False))
@@ -455,8 +366,7 @@ def main():
         if cfg.get("channel_prefix") or source == "repo":
             cfg["current_branch"] = detect_os_branch(cfg, sjc_path)
         if source == "repo":
-            events = fetch_repo_announcements(cfg)
-            cfg["prefetched_events"] = events
+            cfg["prefetched_events"] = fetch_repo_announcements(cfg)
             hidden_gids = []
         else:
             hidden_gids = fetch_hidden_gids(cfg)
@@ -482,8 +392,7 @@ def main():
             cfg["current_branch"] = detect_os_branch(cfg, sjc_path)
 
         if source == "repo":
-            events = fetch_repo_announcements(cfg)
-            cfg["prefetched_events"] = events
+            cfg["prefetched_events"] = fetch_repo_announcements(cfg)
             hidden_gids = []
         else:
             cfg["prefetched_events"] = None
