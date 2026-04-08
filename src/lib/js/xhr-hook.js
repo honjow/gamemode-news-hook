@@ -4,6 +4,8 @@
     var TARGET_APPID = /*TARGET_APPID*/1675200;
     var LANG_LIST = /*LANG_LIST*/'6_0';
     var REFRESH_DEBOUNCE = /*REFRESH_DEBOUNCE*/10000;
+    var CHANNEL_PREFIX = /*CHANNEL_PREFIX*/{};
+    var CURRENT_BRANCH = /*CURRENT_BRANCH*/'';
     var VERSION = '1.1.3';
     window.__skXhrLog = [];
     window.__skVersion = VERSION;
@@ -35,6 +37,24 @@
             }
             window.__skXhrLog.push('blacklist:' + resp.events.length + '->' + filtered.length);
             if (filtered.length > 0) resp.events = filtered;
+        }
+
+        var prefixKeys = Object.keys(CHANNEL_PREFIX);
+        if (prefixKeys.length > 0 && CURRENT_BRANCH) {
+            var channelFiltered = [];
+            for (var ci = 0; ci < resp.events.length; ci++) {
+                var ev = resp.events[ci];
+                var name = ev.event_name || '';
+                var match = name.match(/^\[([A-Za-z])\]\s*/);
+                if (match) {
+                    var pkey = match[1].toUpperCase();
+                    if (CHANNEL_PREFIX[pkey] && CHANNEL_PREFIX[pkey] !== CURRENT_BRANCH) continue;
+                    ev.event_name = name.substring(match[0].length);
+                }
+                channelFiltered.push(ev);
+            }
+            window.__skXhrLog.push('channel:' + resp.events.length + '->' + channelFiltered.length + ' (branch=' + CURRENT_BRANCH + ')');
+            if (channelFiltered.length > 0) resp.events = channelFiltered;
         }
 
         return resp.events;

@@ -48,6 +48,14 @@ english = 46072739
 # japanese =
 # koreana =
 # ...
+
+# Per-channel announcement filtering via title prefix.
+# Announcements with title "[X] ..." only show when current OS branch matches.
+# Announcements without a prefix are shown on all channels.
+[channel_prefix]
+# S = rel
+# B = beta
+# P = preview
 ```
 
 Priority: environment variables > config file > defaults.
@@ -166,3 +174,7 @@ journalctl --user -u gamemode-news-hook -f
 - `Restart=on-failure` ensures automatic recovery from crashes
 - `python-systemd` is optional; if installed, logs go to systemd journal
 - Config file changes take effect on next injection cycle or service restart
+
+## Further reading
+
+- [Steam Event API Research](steam-event-api.md) — OS branches, channel tags, event data structure

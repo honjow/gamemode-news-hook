@@ -80,6 +80,12 @@ def load_config():
             cfg["lang_map"][lang] = int(cid)
         log.debug("Loaded lang_map: %s", cfg["lang_map"])
 
+    cfg["channel_prefix"] = {}
+    if parser.has_section("channel_prefix"):
+        for prefix, branch in parser.items("channel_prefix"):
+            cfg["channel_prefix"][prefix.upper()] = branch
+        log.debug("Loaded channel_prefix: %s", cfg["channel_prefix"])
+
     return cfg
 
 
@@ -137,6 +143,29 @@ def detect_steam_language(cfg, sjc_path):
     except Exception as e:
         log.warning("Failed to detect Steam language: %s", e)
     return None, None
+
+
+def detect_os_branch(cfg, sjc_path):
+    """Detect current OS branch via SteamClient.Updates.
+    通过 SteamClient.Updates 检测当前 OS 更新分支。"""
+    host, port = cfg["cef_host"], cfg["cef_port"]
+    try:
+        ws = cef.connect(host, port, sjc_path)
+        try:
+            result = cef.evaluate(ws, """
+                (async function() {
+                    var b = await SteamClient.Updates.GetCurrentOSBranch();
+                    return b.sRawName || '';
+                })()
+            """, await_promise=True)
+            if result:
+                log.info("Detected OS branch: %s", result)
+                return result
+        finally:
+            ws.close()
+    except Exception as e:
+        log.warning("Failed to detect OS branch: %s", e)
+    return ""
 
 
 def apply_detected_language(cfg, sjc_path):
@@ -201,6 +230,8 @@ def _build_xhr_hook_js(cfg, hidden_gids):
     js = js.replace("/*TARGET_APPID*/1675200", str(cfg["target_appid"]))
     js = js.replace("/*LANG_LIST*/'6_0'", f"'{cfg['lang_list']}'")
     js = js.replace("/*REFRESH_DEBOUNCE*/10000", str(cfg["refresh_debounce"] * 1000))
+    js = js.replace("/*CHANNEL_PREFIX*/{}", json.dumps(cfg.get("channel_prefix", {})))
+    js = js.replace("/*CURRENT_BRANCH*/''", f"'{cfg.get('current_branch', '')}'")
     return js
 
 
@@ -301,6 +332,8 @@ def main():
             sys.exit(1)
         if cfg["lang_list"] == "auto":
             apply_detected_language(cfg, sjc_path)
+        if cfg["channel_prefix"]:
+            cfg["current_branch"] = detect_os_branch(cfg, sjc_path)
         hidden_gids = fetch_hidden_gids(cfg)
         inject(cfg, sjc_path, bp_path, hidden_gids, navigate=True)
         log.info("Done.")
@@ -320,6 +353,8 @@ def main():
             cfg["clan_id"] = orig_clan_id
             cfg["clan_steamid"] = (1 << 56) | (7 << 52) | orig_clan_id
             apply_detected_language(cfg, sjc_path)
+        if cfg["channel_prefix"]:
+            cfg["current_branch"] = detect_os_branch(cfg, sjc_path)
         hidden_gids = fetch_hidden_gids(cfg)
         try:
             inject(cfg, sjc_path, bp_path, hidden_gids)
