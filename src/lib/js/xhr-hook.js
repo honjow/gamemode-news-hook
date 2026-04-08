@@ -6,6 +6,7 @@
     var REFRESH_DEBOUNCE = /*REFRESH_DEBOUNCE*/10000;
     var CHANNEL_PREFIX = /*CHANNEL_PREFIX*/{};
     var CURRENT_BRANCH = /*CURRENT_BRANCH*/'';
+    var PREFETCHED_EVENTS = /*PREFETCHED_EVENTS*/null;
     var VERSION = '1.1.3';
     window.__skXhrLog = [];
     window.__skVersion = VERSION;
@@ -13,6 +14,11 @@
     var TARGET_APPID_STR = 'appid=' + TARGET_APPID;
 
     function fetchOurEvents(applyFilter) {
+        if (PREFETCHED_EVENTS) {
+            window.__skXhrLog.push('prefetched:' + PREFETCHED_EVENTS.length + ' events');
+            return PREFETCHED_EVENTS;
+        }
+
         var resp = null;
         try {
             var x = new XMLHttpRequest();
@@ -61,6 +67,7 @@
     }
 
     function refreshEvents() {
+        if (PREFETCHED_EVENTS) return;
         var now = Date.now();
         if (window.__skLastRefresh && (now - window.__skLastRefresh) < REFRESH_DEBOUNCE) return;
         window.__skLastRefresh = now;
