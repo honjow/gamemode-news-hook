@@ -176,11 +176,7 @@
                 replaced++;
                 window.__skXhrLog.push('hit:gid=' + gid + '->ours[' + entry.idx + ']=' + s.event_name);
 
-                var rawBody = (s.announcement_body && s.announcement_body.body) || '';
-                var firstLine = rawBody.split(/[\r\n]+/)[0]
-                    .replace(/\[\/?\w+[^\]]*\]/g, '').trim();
-
-                o.event_name = firstLine || s.event_name;
+                o.event_name = s.event_name;
 
                 if (o.announcement_body) {
                     o.announcement_body.headline = s.event_name;
@@ -319,12 +315,9 @@
                 if (!src) break;
 
                 var newName = src.event_name || '';
-                var rawBody = (src.announcement_body && src.announcement_body.body) || '';
-                var firstLine = rawBody.split(/[\r\n]+/)[0]
-                    .replace(/\[\/?\w+[^\]]*\]/g, '').trim();
-
-                ev.name.set(langKey, '\u200B' + (firstLine || newName));
+                ev.name.set(langKey, '\u200B' + newName);
                 if (ev.description && ev.description.set) {
+                    var rawBody = (src.announcement_body && src.announcement_body.body) || '';
                     ev.description.set(langKey, '\u200B' + rawBody);
                 }
                 bpPatched++;
