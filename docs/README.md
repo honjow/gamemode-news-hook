@@ -11,9 +11,9 @@ Valve event cards with custom announcements from a GitHub/Gitee repository or St
 2. **Steam source** — fetches announcements live from a Steam community group via XHR
 3. **XHR Hook** (SharedJSContext + BigPicture) — intercepts event API responses and replaces content
 4. **MutationObserver** (BigPicture) — hides like/discuss buttons on replaced cards via zero-width space marker
-5. **BP Event Patch** (BigPicture) — detects stale Valve events in React fiber and overwrites MobX observables to trigger re-render
+5. **BP Event Patch** (BigPicture) — detects stale Valve events in React fiber; patches card titles via MobX observables, patches expanded detail view by invalidating React.memo and forcing re-render
 6. **Auto language detection** — detects Steam UI language via `SteamClient.Settings.GetCurrentLanguage()` and filters by language
-7. **Daemon mode** — monitors hook liveness and re-injects on Steam restart or JS context reset
+7. **Daemon mode** — monitors hook liveness and re-injects on Steam restart or JS context reset; detects OS branch (channel) changes and triggers full re-injection with fresh data
 
 ## Configuration
 
@@ -112,6 +112,7 @@ Install paths:
 - Auto-detects Steam UI language via CDP (`SteamClient.Settings.GetCurrentLanguage()`)
 - **Manual mode**: connect, inject, navigate, exit
 - **Daemon mode** (`--auto`): loop of wait → detect language → fetch → inject → monitor → re-inject
+- Monitors OS branch changes via `SteamClient.Updates.GetCurrentOSBranch()` and triggers full re-injection when user switches update channels
 - Signal handling: graceful shutdown on SIGTERM/SIGINT
 
 ### `cef.py` — CEF communication layer
@@ -130,7 +131,8 @@ Install paths:
 - Live-refreshes announcements on each intercepted request with debounce (steam mode)
 - Generation mechanism prevents stale hook stacking
 - Flushes `g_PartnerEventStore` MobX cache on injection (SharedJSContext)
-- Patches stale React fiber event data via MobX ObservableMap (BigPicture)
+- Patches stale React fiber event data via MobX ObservableMap (BigPicture card view)
+- Patches expanded detail view BBCode renderers by invalidating React.memo on parent components and triggering forceUpdate (debounced via MutationObserver)
 - MutationObserver watches for newly rendered event cards and patches them on the fly
 
 ### `observer.js` — MutationObserver
@@ -181,7 +183,7 @@ journalctl --user -u gamemode-news-hook -f
 ## Notes
 
 - Must restart the service after modifying hook logic, otherwise old hooks stack
-- Daemon mode monitors hook liveness (every 5s) and re-injects on Steam restart or JS context reset
+- Daemon mode monitors hook liveness (every 5s) and re-injects on Steam restart, JS context reset, or OS channel switch
 - `Restart=on-failure` ensures automatic recovery from crashes
 - `python-systemd` is optional; if installed, logs go to systemd journal
 - Config file changes take effect on next injection cycle or service restart

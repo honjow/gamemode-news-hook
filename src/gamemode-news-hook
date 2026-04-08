@@ -298,14 +298,16 @@ def inject(cfg, sjc_path, bp_path, hidden_gids, navigate=False):
 
 
 def monitor_cef(cfg, sjc_path):
-    """Poll hook liveness via __skGen. Returns when hook is gone or CEF is down.
-    Retries a few times before declaring dead to avoid false positives.
-    通过 __skGen 轮询钩子是否存活；钩子丢失或 CEF 不可达时返回。
-    连续失败多次才判定断开，减少误判。"""
+    """Poll hook liveness via __skGen and detect OS branch changes.
+    Returns when hook is gone, CEF is down, or branch changed (triggers re-inject).
+    通过 __skGen 轮询钩子存活并检测 OS 分支变化。
+    钩子丢失、CEF 不可达、或分支变更时返回（触发重新注入）。"""
     host, port = cfg["cef_host"], cfg["cef_port"]
     interval = cfg["monitor_interval"]
     fail_count = 0
     max_failures = 2
+    check_branch = cfg.get("source") == "repo"
+    last_branch = cfg.get("current_branch", "")
 
     while not _shutdown:
         time.sleep(interval)
@@ -313,11 +315,22 @@ def monitor_cef(cfg, sjc_path):
             ws = cef.connect(host, port, sjc_path)
             try:
                 val = cef.evaluate(ws, "typeof window.__skGen !== 'undefined' ? 'alive' : 'gone'")
+                if val != "alive":
+                    log.info("Hook state lost (JS context reset)")
+                    return
+                if check_branch and last_branch:
+                    branch = cef.evaluate(ws, """
+                        (async function() {
+                            var b = await SteamClient.Updates.GetCurrentOSBranch();
+                            return b.sRawName || '';
+                        })()
+                    """, await_promise=True)
+                    if branch and branch != last_branch:
+                        log.info("OS branch changed: %s -> %s, re-injecting",
+                                 last_branch, branch)
+                        return
             finally:
                 ws.close()
-            if val != "alive":
-                log.info("Hook state lost (JS context reset)")
-                return
             fail_count = 0
         except Exception as e:
             fail_count += 1

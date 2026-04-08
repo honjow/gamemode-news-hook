@@ -291,6 +291,14 @@
                         o.announcement_body.posttime = s.announcement_body.posttime;
                     if (s.announcement_body && s.announcement_body.updatetime)
                         o.announcement_body.updatetime = s.announcement_body.updatetime;
+                } else if (s.announcement_body) {
+                    o.announcement_body = {
+                        gid: s.announcement_body.gid || s.gid,
+                        headline: s.event_name,
+                        body: '\u200B' + (s.announcement_body.body || ''),
+                        posttime: s.announcement_body.posttime || o.rtime32_start_time,
+                        updatetime: s.announcement_body.updatetime || o.rtime32_start_time
+                    };
                 }
 
                 if (s.rtime32_start_time) o.rtime32_start_time = s.rtime32_start_time;
@@ -353,91 +361,191 @@
         return origSend.apply(this, arguments);
     };
 
-    // Flush PartnerEventStore cache for TARGET_APPID so stale entries
+    // Flush PartnerEventStore caches for TARGET_APPID so stale entries
     // don't survive across re-injections (MobX ObservableMap).
     var storeCleared = 0;
     try {
-        if (typeof g_PartnerEventStore !== 'undefined' && g_PartnerEventStore.m_mapExistingEvents) {
-            var evMap = g_PartnerEventStore.m_mapExistingEvents;
-            var evData = evMap.data_;
-            if (evData) {
+        if (typeof g_PartnerEventStore !== 'undefined') {
+            var store = g_PartnerEventStore;
+
+            // m_mapExistingEvents: event GID -> event object
+            if (store.m_mapExistingEvents && store.m_mapExistingEvents.data_) {
                 var toDelete = [];
-                evData.forEach(function(v, k) {
+                store.m_mapExistingEvents.data_.forEach(function(v, k) {
                     var val = v && v.value_ !== undefined ? v.value_ : v;
                     if (val && val.appid === TARGET_APPID) toDelete.push(k);
                 });
-                for (var di = 0; di < toDelete.length; di++) evMap.delete(toDelete[di]);
-                storeCleared = toDelete.length;
+                for (var di = 0; di < toDelete.length; di++) store.m_mapExistingEvents.delete(toDelete[di]);
+                storeCleared += toDelete.length;
             }
-            var appMap = g_PartnerEventStore.m_mapAppIDToGIDs;
-            if (appMap && appMap.delete) {
-                appMap.delete(TARGET_APPID);
-                appMap.delete(String(TARGET_APPID));
+
+            // m_mapAnnouncementBodyToEvent: announcement body GID -> event object
+            // Values lack appid, so clear all entries unconditionally.
+            if (store.m_mapAnnouncementBodyToEvent && store.m_mapAnnouncementBodyToEvent.data_) {
+                var abDel = [];
+                store.m_mapAnnouncementBodyToEvent.data_.forEach(function(v, k) { abDel.push(k); });
+                for (var di = 0; di < abDel.length; di++) store.m_mapAnnouncementBodyToEvent.delete(abDel[di]);
+                storeCleared += abDel.length;
             }
-            window.__skXhrLog.push('store:cleared ' + storeCleared + ' cached events');
+
+            // m_mapAppIDToGIDs
+            if (store.m_mapAppIDToGIDs && store.m_mapAppIDToGIDs.delete) {
+                store.m_mapAppIDToGIDs.delete(TARGET_APPID);
+                store.m_mapAppIDToGIDs.delete(String(TARGET_APPID));
+            }
+
+            // m_mapClanToGIDs
+            if (store.m_mapClanToGIDs && store.m_mapClanToGIDs.data_) {
+                var clanDel = [];
+                store.m_mapClanToGIDs.data_.forEach(function(v, k) { clanDel.push(k); });
+                for (var di = 0; di < clanDel.length; di++) store.m_mapClanToGIDs.delete(clanDel[di]);
+            }
+
+            window.__skXhrLog.push('store:cleared ' + storeCleared + ' cached entries');
         }
     } catch(e) {
         window.__skXhrLog.push('store:clear error ' + e.message);
     }
 
     // Patch stale event data already rendered in BigPicture's React tree.
-    // Uses semantic DOM attributes (role="button") + React fiber inspection
-    // instead of fragile minified CSS class names.
     var bpPatched = 0;
+    var _lastBBCodeScan = 0;
+
+    function _findFiberKey(el) {
+        var keys = Object.keys(el);
+        for (var i = 0; i < keys.length; i++)
+            if (keys[i].indexOf('__reactFiber') === 0) return keys[i];
+        return null;
+    }
+
+    function _getExpected(gid) {
+        var ours = window.__skOurEvents;
+        if (!ours || !ours.length) return null;
+        var entry = window.__skTargetGids && window.__skTargetGids[gid];
+        var src = entry ? ours[entry.idx] : ours[0];
+        if (!src) return null;
+        return {
+            name: '\u200B' + (src.event_name || ''),
+            body: '\u200B' + ((src.announcement_body && src.announcement_body.body) || '')
+        };
+    }
+
     function patchBPEvents() {
         var ours = window.__skOurEvents;
         if (!ours || !ours.length || !document.body) return;
 
+        // Phase 1: patch event MobX maps via [role="button"] (card titles)
         var buttons = document.querySelectorAll('[role="button"]');
         for (var bi = 0; bi < buttons.length; bi++) {
-            var el = buttons[bi];
-            var fiberKey = null;
-            var elKeys = Object.keys(el);
-            for (var ki = 0; ki < elKeys.length; ki++) {
-                if (elKeys[ki].indexOf('__reactFiber') === 0) { fiberKey = elKeys[ki]; break; }
-            }
-            if (!fiberKey) continue;
+            var fk = _findFiberKey(buttons[bi]);
+            if (!fk) continue;
 
-            var cur = el[fiberKey];
+            var cur = buttons[bi][fk];
             for (var fd = 0; fd < 10 && cur; fd++, cur = cur.return) {
                 var ev = cur.memoizedProps && cur.memoizedProps.event;
                 if (!ev || ev.appid !== TARGET_APPID) continue;
                 if (!ev.name || !ev.name.data_) break;
 
-                var nameData = ev.name.data_;
-                var firstNameVal = null;
                 var langKey = null;
-                nameData.forEach(function(v, k) {
-                    if (firstNameVal === null) {
-                        firstNameVal = v && v.value_ !== undefined ? v.value_ : v;
+                var nameVal = null;
+                ev.name.data_.forEach(function(v, k) {
+                    if (nameVal === null) {
+                        nameVal = v && v.value_ !== undefined ? v.value_ : v;
                         langKey = k;
                     }
                 });
-                if (!firstNameVal || firstNameVal.charCodeAt(0) === 0x200B) break;
+                if (!nameVal) break;
 
-                var gid = ev.GID;
-                var entry = window.__skTargetGids && window.__skTargetGids[gid];
-                var src = entry ? ours[entry.idx] : ours[0];
-                if (!src) break;
+                var exp = _getExpected(ev.GID);
+                if (!exp) break;
+                if (nameVal === exp.name) break;
 
-                var newName = src.event_name || '';
-                ev.name.set(langKey, '\u200B' + newName);
-                if (ev.description && ev.description.set) {
-                    var rawBody = (src.announcement_body && src.announcement_body.body) || '';
-                    ev.description.set(langKey, '\u200B' + rawBody);
+                ev.name.set(langKey, exp.name);
+                if (ev.description && ev.description.set)
+                    ev.description.set(langKey, exp.body);
+                bpPatched++;
+                window.__skXhrLog.push('bp-patch:gid=' + ev.GID + ' -> ' + exp.name.substring(1, 30));
+                break;
+            }
+        }
+
+    }
+
+    // Phase 2: fix stale BBCode renderers in expanded detail view.
+    // Debounced — runs 200ms after the last DOM mutation so the expanded view
+    // is fully built before we scan.
+    var _bbcodeTimer = null;
+    function scheduleBBCodePatch() {
+        if (_bbcodeTimer) clearTimeout(_bbcodeTimer);
+        _bbcodeTimer = setTimeout(patchStaleBBCode, 200);
+    }
+
+    function patchStaleBBCode() {
+        var ours = window.__skOurEvents;
+        if (!ours || !ours.length || !document.body) return;
+
+        var els = document.body.querySelectorAll('div, b, ul, li, span, br, p');
+        for (var si = 0; si < els.length; si++) {
+            var sfk = _findFiberKey(els[si]);
+            if (!sfk) continue;
+
+            var scur = els[si][sfk];
+            for (var sfd = 0; sfd < 3 && scur; sfd++, scur = scur.return) {
+                if (!scur.memoizedProps || typeof scur.memoizedProps.text !== 'string') continue;
+                if (scur.memoizedProps.text.charCodeAt(0) !== 0x200B) continue;
+
+                var sevt = scur.memoizedProps.event;
+                if (!sevt || sevt.appid !== TARGET_APPID) continue;
+
+                var sexp = _getExpected(sevt.GID);
+                if (!sexp || scur.memoizedProps.text === sexp.body) continue;
+
+                // Stale body — update MobX maps so K reads new data on re-render
+                var sLang = 6;
+                if (sevt.description && sevt.description.set) {
+                    if (sevt.description.data_)
+                        sevt.description.data_.forEach(function(v, k) { sLang = k; });
+                    sevt.description.set(sLang, sexp.body);
+                }
+                if (sevt.name && sevt.name.set) {
+                    var nLang = 6;
+                    if (sevt.name.data_)
+                        sevt.name.data_.forEach(function(v, k) { nLang = k; });
+                    sevt.name.set(nLang, sexp.name);
+                }
+
+                // Invalidate React.memo on K (parent with event prop)
+                var kCur = scur.return;
+                for (var kd = 0; kd < 10 && kCur; kd++, kCur = kCur.return) {
+                    if (kCur.memoizedProps && kCur.memoizedProps.event === sevt) {
+                        kCur.memoizedProps = Object.assign({}, kCur.memoizedProps, {__skV: Date.now()});
+                        if (kCur.alternate && kCur.alternate.memoizedProps)
+                            kCur.alternate.memoizedProps = Object.assign({}, kCur.alternate.memoizedProps, {__skV: Date.now()});
+                        break;
+                    }
+                }
+
+                // forceUpdate on nearest class component
+                var fuCur = scur.return;
+                for (var fud = 0; fud < 15 && fuCur; fud++, fuCur = fuCur.return) {
+                    if (fuCur.stateNode && typeof fuCur.stateNode.forceUpdate === 'function') {
+                        fuCur.stateNode.forceUpdate();
+                        break;
+                    }
                 }
                 bpPatched++;
-                window.__skXhrLog.push('bp-patch:gid=' + gid + ' -> ' + newName);
-                break;
+                window.__skXhrLog.push('bp-bbcode-fix:gid=' + sevt.GID + ' patched + forceUpdate');
             }
         }
     }
 
     if (typeof document !== 'undefined' && document.body) {
         patchBPEvents();
+        patchStaleBBCode();
         var bpObs = new MutationObserver(function() {
             if (window.__skGen !== GEN) { bpObs.disconnect(); return; }
             patchBPEvents();
+            scheduleBBCodePatch();
         });
         bpObs.observe(document.body, { childList: true, subtree: true });
     }
