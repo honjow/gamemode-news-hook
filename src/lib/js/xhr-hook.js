@@ -4,7 +4,7 @@
     var TARGET_APPID = /*TARGET_APPID*/1675200;
     var LANG_LIST = /*LANG_LIST*/'6_0';
     var REFRESH_DEBOUNCE = /*REFRESH_DEBOUNCE*/10000;
-    var VERSION = '1.1.0';
+    var VERSION = '1.1.3';
     window.__skXhrLog = [];
     window.__skVersion = VERSION;
 
