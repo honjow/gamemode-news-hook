@@ -261,22 +261,31 @@
             var ours = window.__skOurEvents;
             if (!orig.events || !ours) return rawText;
 
+            // Build set of ours indices already assigned in this response
+            var usedIdx = {};
+            for (var i = 0; i < orig.events.length; i++) {
+                var entry = window.__skTargetGids[String(orig.events[i].gid)];
+                if (entry) usedIdx[entry.idx] = true;
+            }
+
             for (var i = 0; i < orig.events.length && window.__skTargetCount < ours.length; i++) {
                 var g = String(orig.events[i].gid);
                 if (!window.__skTargetGids[g]) {
                     var rank = window.__skValveRank[g];
-                    var idx;
-                    if (rank !== undefined && rank < ours.length) {
+                    var idx = -1;
+                    if (rank !== undefined && rank < ours.length && !usedIdx[rank]) {
                         idx = rank;
                     } else {
-                        idx = window.__skNextFallbackIdx;
-                        window.__skNextFallbackIdx++;
+                        for (var fi = 0; fi < ours.length; fi++) {
+                            if (!usedIdx[fi]) { idx = fi; break; }
+                        }
                     }
-                    if (idx < ours.length) {
+                    if (idx >= 0 && idx < ours.length) {
                         window.__skTargetGids[g] = {
                             idx: idx,
                             time: orig.events[i].rtime32_start_time || 0
                         };
+                        usedIdx[idx] = true;
                         window.__skTargetCount++;
                     }
                 }
