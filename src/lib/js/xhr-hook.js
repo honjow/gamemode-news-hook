@@ -73,12 +73,15 @@
                     try {
                         var events = parseRepoJSON(JSON.parse(x.responseText));
                         if (events && events.length > 0) {
+                            var changed = events.length !== (window.__skOurEvents || []).length;
                             window.__skOurEvents = events;
                             window.__skOurTitle = events[0].event_name;
-                            window.__skTargetGids = {};
-                            window.__skTargetCount = 0;
-                            window.__skNextFallbackIdx = Object.keys(window.__skValveRank || {}).length;
-                            window.__skXhrLog.push('repo-refresh:' + events.length + ' events');
+                            if (changed) {
+                                window.__skTargetGids = {};
+                                window.__skTargetCount = 0;
+                                window.__skNextFallbackIdx = Object.keys(window.__skValveRank || {}).length;
+                            }
+                            window.__skXhrLog.push('repo-refresh:' + events.length + ' events' + (changed ? ' (reset)' : ''));
                         }
                     } catch(e) {}
                 } else {
@@ -152,12 +155,15 @@
         if (REPO_MIRRORS.length > 0) { refreshRepoAsync(); return; }
         var events = fetchOurEvents(true);
         if (events && events.length > 0) {
+            var changed = events.length !== (window.__skOurEvents || []).length;
             window.__skOurEvents = events;
             window.__skOurTitle = events[0].event_name;
-            window.__skTargetGids = {};
-            window.__skTargetCount = 0;
-            window.__skNextFallbackIdx = Object.keys(window.__skValveRank || {}).length;
-            window.__skXhrLog.push('refresh:' + events.length + ' events');
+            if (changed) {
+                window.__skTargetGids = {};
+                window.__skTargetCount = 0;
+                window.__skNextFallbackIdx = Object.keys(window.__skValveRank || {}).length;
+            }
+            window.__skXhrLog.push('refresh:' + events.length + ' events' + (changed ? ' (reset)' : ''));
         }
     }
 
@@ -429,11 +435,29 @@
         return null;
     }
 
-    function _getExpected(gid) {
+    function _getExpected(gid, eventObj) {
         var ours = window.__skOurEvents;
         if (!ours || !ours.length) return null;
+        var src = null;
         var entry = window.__skTargetGids && window.__skTargetGids[gid];
-        var src = entry ? ours[entry.idx] : ours[0];
+        if (entry) {
+            src = ours[entry.idx];
+        } else if (eventObj) {
+            // In BP context targetGids may be empty; match by name
+            var curName = null;
+            if (eventObj.name && eventObj.name.data_) {
+                eventObj.name.data_.forEach(function(v) {
+                    if (curName === null) curName = v && v.value_ !== undefined ? v.value_ : v;
+                });
+            }
+            if (curName) {
+                var clean = curName.charCodeAt(0) === 0x200B ? curName.substring(1) : curName;
+                for (var i = 0; i < ours.length; i++) {
+                    if (ours[i].event_name === clean) { src = ours[i]; break; }
+                }
+            }
+        }
+        if (!src) src = ours[0];
         if (!src) return null;
         return {
             name: '\u200B' + (src.event_name || ''),
@@ -467,7 +491,7 @@
                 });
                 if (!nameVal) break;
 
-                var exp = _getExpected(ev.GID);
+                var exp = _getExpected(ev.GID, ev);
                 if (!exp) break;
                 if (nameVal === exp.name) break;
 
@@ -508,7 +532,7 @@
                 var sevt = scur.memoizedProps.event;
                 if (!sevt || sevt.appid !== TARGET_APPID) continue;
 
-                var sexp = _getExpected(sevt.GID);
+                var sexp = _getExpected(sevt.GID, sevt);
                 if (!sexp || scur.memoizedProps.text === sexp.body) continue;
 
                 // Stale body — update MobX maps so K reads new data on re-render
