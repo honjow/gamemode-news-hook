@@ -1,10 +1,6 @@
 (function() {
-    var SK_CLAN = /*SK_CLAN*/0;
-    var HIDDEN_GIDS = /*HIDDEN_GIDS*/[];
     var TARGET_APPID = /*TARGET_APPID*/1675200;
     var LANG_LIST = /*LANG_LIST*/'6_0';
-    var REFRESH_DEBOUNCE = /*REFRESH_DEBOUNCE*/10000;
-    var CHANNEL_PREFIX = /*CHANNEL_PREFIX*/{};
     var CURRENT_BRANCH = /*CURRENT_BRANCH*/'';
     var REPO_MIRRORS = /*REPO_MIRRORS*/[];
     var DETECTED_LANG = /*DETECTED_LANG*/'';
@@ -95,80 +91,14 @@
         tryNext();
     }
 
-    function fetchSteamEvents(applyFilter) {
-        var resp = null;
-        try {
-            var x = new XMLHttpRequest();
-            x.open('GET',
-                'https://store.steampowered.com/events/ajaxgetadjacentpartnerevents/'
-                + '?clan_accountid=' + SK_CLAN
-                + '&count_before=0&count_after=50&lang_list=' + LANG_LIST
-                + '&only_summaries=false',
-                false);
-            x.send();
-            if (x.status === 200) resp = JSON.parse(x.responseText);
-        } catch(e) {}
-        if (!resp || !resp.events || resp.events.length === 0) return null;
-
-        if (applyFilter && HIDDEN_GIDS.length > 0) {
-            var hset = {};
-            for (var hi = 0; hi < HIDDEN_GIDS.length; hi++) hset[HIDDEN_GIDS[hi]] = true;
-            var filtered = [];
-            for (var fi = 0; fi < resp.events.length; fi++) {
-                var agid = resp.events[fi].announcement_body && resp.events[fi].announcement_body.gid;
-                if (!agid || !hset[String(agid)]) filtered.push(resp.events[fi]);
-            }
-            window.__skXhrLog.push('blacklist:' + resp.events.length + '->' + filtered.length);
-            if (filtered.length > 0) resp.events = filtered;
-        }
-
-        var prefixKeys = Object.keys(CHANNEL_PREFIX);
-        if (prefixKeys.length > 0 && CURRENT_BRANCH) {
-            var channelFiltered = [];
-            for (var ci = 0; ci < resp.events.length; ci++) {
-                var ev = resp.events[ci];
-                var name = ev.event_name || '';
-                var match = name.match(/^\[([A-Za-z])\]\s*/);
-                if (match) {
-                    var pkey = match[1].toUpperCase();
-                    if (CHANNEL_PREFIX[pkey] && CHANNEL_PREFIX[pkey] !== CURRENT_BRANCH) continue;
-                    ev.event_name = name.substring(match[0].length);
-                }
-                channelFiltered.push(ev);
-            }
-            window.__skXhrLog.push('channel:' + resp.events.length + '->' + channelFiltered.length + ' (branch=' + CURRENT_BRANCH + ')');
-            if (channelFiltered.length > 0) resp.events = channelFiltered;
-        }
-
-        return resp.events;
-    }
-
-    function fetchOurEvents(applyFilter) {
-        if (PREFETCHED_EVENTS) return parseRepoJSON(PREFETCHED_EVENTS);
-        return fetchSteamEvents(applyFilter);
-    }
-
     function refreshEvents() {
         var now = Date.now();
-        if (window.__skLastRefresh && (now - window.__skLastRefresh) < REFRESH_DEBOUNCE) return;
+        if (window.__skLastRefresh && (now - window.__skLastRefresh) < 10000) return;
         window.__skLastRefresh = now;
         if (REPO_MIRRORS.length > 0) { refreshRepoAsync(); return; }
-        var events = fetchOurEvents(true);
-        if (events && events.length > 0) {
-            var changed = events.length !== (window.__skOurEvents || []).length;
-            window.__skOurEvents = events;
-            window.__skOurTitle = events[0].event_name;
-            if (changed) {
-                window.__skTargetGids = {};
-                window.__skTargetCount = 0;
-                window.__skNextFallbackIdx = Object.keys(window.__skValveRank || {}).length;
-            }
-            window.__skXhrLog.push('refresh:' + events.length + ' events' + (changed ? ' (reset)' : ''));
-        }
     }
 
-    // Initial fetch with filter / 带黑名单过滤的首次拉取
-    var initEvents = fetchOurEvents(true);
+    var initEvents = parseRepoJSON(PREFETCHED_EVENTS);
     if (!initEvents || initEvents.length === 0)
         return JSON.stringify({error: 'failed to fetch our events'});
 

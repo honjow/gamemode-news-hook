@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
 """
-gamemode-news-hook — Replace Steam Game Mode update cards with community announcements.
-gamemode-news-hook — 将 Steam 游戏模式（大屏）的更新卡片替换为社区组公告。
+gamemode-news-hook — Replace Steam Game Mode update cards with custom announcements.
+gamemode-news-hook — 将 Steam 游戏模式（大屏）的更新卡片替换为自定义公告。
 
 Injects JS into Steam's CEF pages via remote debugging protocol to replace
-Valve event cards with custom community group announcements.
-通过 CEF 远程调试向 Steam 页面注入 JavaScript，用自定义社区组公告替换 Valve 活动卡片。
+Valve event cards with custom announcements from a repository.
+通过 CEF 远程调试向 Steam 页面注入 JavaScript，用仓库中的自定义公告替换 Valve 活动卡片。
 """
 
 import json
 import sys
 import os
 import time
-import re
 import signal
 import logging
 import configparser
@@ -30,17 +29,12 @@ log = logging.getLogger("gamemode-news-hook")
 VERSION = "1.2.3"
 
 DEFAULTS = {
-    "source": "repo",
-    "clan_id": "46069703",
     "target_appid": "1675200",
     "cef_host": "localhost",
     "cef_port": "8080",
     "lang_list": "auto",
     "monitor_interval": "5",
-    "refresh_debounce": "10",
 }
-
-_last_hidden_gids = []
 
 
 def load_config():
@@ -56,38 +50,20 @@ def load_config():
         log.debug("Loaded config from %s", CONFIG_PATH)
 
     env_map = {
-        "GNHOOK_CLAN_ID": "clan_id",
         "GNHOOK_TARGET_APPID": "target_appid",
         "GNHOOK_CEF_HOST": "cef_host",
         "GNHOOK_CEF_PORT": "cef_port",
         "GNHOOK_LANG_LIST": "lang_list",
         "GNHOOK_MONITOR_INTERVAL": "monitor_interval",
-        "GNHOOK_REFRESH_DEBOUNCE": "refresh_debounce",
-        "SK_CLAN": "clan_id",
     }
     for env_key, cfg_key in env_map.items():
         val = os.environ.get(env_key)
         if val is not None:
             cfg[cfg_key] = val
 
-    cfg["clan_id"] = int(cfg["clan_id"])
     cfg["target_appid"] = int(cfg["target_appid"])
     cfg["cef_port"] = int(cfg["cef_port"])
     cfg["monitor_interval"] = int(cfg["monitor_interval"])
-    cfg["refresh_debounce"] = int(cfg["refresh_debounce"])
-    cfg["clan_steamid"] = (1 << 56) | (7 << 52) | cfg["clan_id"]
-
-    cfg["lang_map"] = {}
-    if parser.has_section("lang_map"):
-        for lang, cid in parser.items("lang_map"):
-            cfg["lang_map"][lang] = int(cid)
-        log.debug("Loaded lang_map: %s", cfg["lang_map"])
-
-    cfg["channel_prefix"] = {}
-    if parser.has_section("channel_prefix"):
-        for prefix, branch in parser.items("channel_prefix"):
-            cfg["channel_prefix"][prefix.upper()] = branch
-        log.debug("Loaded channel_prefix: %s", cfg["channel_prefix"])
 
     cfg["repo_mirrors"] = []
     if parser.has_section("repo_mirrors"):
@@ -178,8 +154,8 @@ def detect_os_branch(cfg, sjc_path):
 
 
 def apply_detected_language(cfg, sjc_path):
-    """Detect Steam language and update cfg with lang_list and lang_map clan_id.
-    检测 Steam 语言，更新 cfg 中的 lang_list，并根据 lang_map 切换 clan_id。"""
+    """Detect Steam language and update cfg with lang_list and detected_lang_name.
+    检测 Steam 语言，更新 cfg 中的 lang_list 和 detected_lang_name。"""
     lang_name, lang_id = detect_steam_language(cfg, sjc_path)
     if lang_name is None:
         cfg["lang_list"] = "0"
@@ -188,12 +164,6 @@ def apply_detected_language(cfg, sjc_path):
     cfg["lang_list"] = str(lang_id) if lang_id == 0 else f"{lang_id}_0"
     cfg["detected_lang_name"] = lang_name
     log.info("lang_list=%s (lang=%s)", cfg["lang_list"], lang_name)
-
-    lang_map = cfg.get("lang_map", {})
-    if lang_name in lang_map:
-        cfg["clan_id"] = lang_map[lang_name]
-        cfg["clan_steamid"] = (1 << 56) | (7 << 52) | cfg["clan_id"]
-        log.info("lang_map matched: %s -> clan_id=%d", lang_name, cfg["clan_id"])
 
 
 def fetch_repo_announcements(cfg):
@@ -211,51 +181,12 @@ def fetch_repo_announcements(cfg):
     return []
 
 
-def fetch_hidden_gids(cfg):
-    """Build blacklist: GIDs in API but not on community page.
-    Falls back to cached result on failure.
-    构建黑名单：出现在 API 但不在社区公告页的 GID。
-    请求失败时回退到上次缓存结果。"""
-    global _last_hidden_gids
-    try:
-        api_url = (
-            f"https://store.steampowered.com/events/ajaxgetadjacentpartnerevents/"
-            f"?clan_accountid={cfg['clan_id']}&count_before=0&count_after=50"
-            f"&lang_list={cfg['lang_list']}&only_summaries=true"
-        )
-        api_resp = json.loads(urllib.request.urlopen(api_url, timeout=10).read().decode())
-        api_gids = set()
-        for ev in api_resp.get("events", []):
-            ab = ev.get("announcement_body")
-            if ab and ab.get("gid"):
-                api_gids.add(str(ab["gid"]))
-
-        page_url = f"https://steamcommunity.com/gid/{cfg['clan_steamid']}/announcements"
-        html = urllib.request.urlopen(page_url, timeout=10).read().decode()
-        page_gids = set(re.findall(r'detail/(\d{10,})', html))
-
-        hidden = list(api_gids - page_gids)
-        log.info("API GIDs: %d, Page GIDs: %d, Hidden: %s", len(api_gids), len(page_gids), hidden)
-        _last_hidden_gids = hidden
-        return hidden
-    except Exception as e:
-        log.warning("Failed to build hidden GIDs list: %s", e)
-        if _last_hidden_gids:
-            log.info("Using cached hidden GIDs from previous successful fetch")
-            return _last_hidden_gids
-        return []
-
-
-def _build_xhr_hook_js(cfg, hidden_gids):
+def _build_xhr_hook_js(cfg):
     """Build the parameterized XHR hook JS string.
     构造参数化的 XHR 钩子 JS 字符串。"""
     js = read_js("xhr-hook.js")
-    js = js.replace("/*SK_CLAN*/0", str(cfg["clan_id"]))
-    js = js.replace("/*HIDDEN_GIDS*/[]", json.dumps(hidden_gids))
     js = js.replace("/*TARGET_APPID*/1675200", str(cfg["target_appid"]))
     js = js.replace("/*LANG_LIST*/'6_0'", f"'{cfg['lang_list']}'")
-    js = js.replace("/*REFRESH_DEBOUNCE*/10000", str(cfg["refresh_debounce"] * 1000))
-    js = js.replace("/*CHANNEL_PREFIX*/{}", json.dumps(cfg.get("channel_prefix", {})))
     js = js.replace("/*CURRENT_BRANCH*/''", f"'{cfg.get('current_branch', '')}'")
     js = js.replace("/*REPO_MIRRORS*/[]", json.dumps(cfg.get("repo_mirrors", [])))
     js = js.replace("/*DETECTED_LANG*/''", f"'{cfg.get('detected_lang_name', '')}'")
@@ -265,11 +196,11 @@ def _build_xhr_hook_js(cfg, hidden_gids):
     return js
 
 
-def inject(cfg, sjc_path, bp_path, hidden_gids, navigate=False):
+def inject(cfg, sjc_path, bp_path, navigate=False):
     """Inject XHR hook and observer into CEF pages.
     向 CEF 页面注入 XHR 钩子与 MutationObserver。"""
     host, port = cfg["cef_host"], cfg["cef_port"]
-    xhr_js = _build_xhr_hook_js(cfg, hidden_gids)
+    xhr_js = _build_xhr_hook_js(cfg)
 
     log.info("Injecting XHR hook into SharedJSContext...")
     ws_sjc = cef.connect(host, port, sjc_path)
@@ -308,7 +239,6 @@ def monitor_cef(cfg, sjc_path):
     interval = cfg["monitor_interval"]
     fail_count = 0
     max_failures = 2
-    check_branch = cfg.get("source") == "repo"
     last_branch = cfg.get("current_branch", "")
 
     while not _shutdown:
@@ -320,7 +250,7 @@ def monitor_cef(cfg, sjc_path):
                 if val != "alive":
                     log.info("Hook state lost (JS context reset)")
                     return
-                if check_branch and last_branch:
+                if last_branch:
                     branch = cef.evaluate(ws, """
                         (async function() {
                             var b = await SteamClient.Updates.GetCurrentOSBranch();
@@ -360,11 +290,8 @@ def main():
     signal.signal(signal.SIGINT, _handle_signal)
 
     cfg = load_config()
-    log.info("Config: clan_id=%d, target_appid=%d, cef=%s:%d",
-             cfg["clan_id"], cfg["target_appid"], cfg["cef_host"], cfg["cef_port"])
-
-    source = cfg.get("source", "steam")
-    log.info("Announcement source: %s", source)
+    log.info("Config: target_appid=%d, cef=%s:%d",
+             cfg["target_appid"], cfg["cef_host"], cfg["cef_port"])
 
     if not auto:
         log.info("Manual mode: connecting to CEF...")
@@ -378,20 +305,14 @@ def main():
             sys.exit(1)
         if cfg["lang_list"] == "auto":
             apply_detected_language(cfg, sjc_path)
-        if cfg.get("channel_prefix") or source == "repo":
-            cfg["current_branch"] = detect_os_branch(cfg, sjc_path)
-        if source == "repo":
-            cfg["prefetched_events"] = fetch_repo_announcements(cfg)
-            hidden_gids = []
-        else:
-            hidden_gids = fetch_hidden_gids(cfg)
-        inject(cfg, sjc_path, bp_path, hidden_gids, navigate=True)
+        cfg["current_branch"] = detect_os_branch(cfg, sjc_path)
+        cfg["prefetched_events"] = fetch_repo_announcements(cfg)
+        inject(cfg, sjc_path, bp_path, navigate=True)
         log.info("Done.")
         return
 
     # Daemon mode
     auto_lang = cfg["lang_list"] == "auto"
-    orig_clan_id = cfg["clan_id"]
     while not _shutdown:
         log.info("Waiting for Steam CEF...")
         sjc_path, bp_path = cef.wait_for_pages(host=cfg["cef_host"], port=cfg["cef_port"])
@@ -400,21 +321,12 @@ def main():
             continue
 
         if auto_lang:
-            cfg["clan_id"] = orig_clan_id
-            cfg["clan_steamid"] = (1 << 56) | (7 << 52) | orig_clan_id
             apply_detected_language(cfg, sjc_path)
-        if cfg.get("channel_prefix") or source == "repo":
-            cfg["current_branch"] = detect_os_branch(cfg, sjc_path)
-
-        if source == "repo":
-            cfg["prefetched_events"] = fetch_repo_announcements(cfg)
-            hidden_gids = []
-        else:
-            cfg["prefetched_events"] = None
-            hidden_gids = fetch_hidden_gids(cfg)
+        cfg["current_branch"] = detect_os_branch(cfg, sjc_path)
+        cfg["prefetched_events"] = fetch_repo_announcements(cfg)
 
         try:
-            inject(cfg, sjc_path, bp_path, hidden_gids)
+            inject(cfg, sjc_path, bp_path)
             log.info("Injection complete, monitoring...")
         except Exception as e:
             log.error("Injection failed: %s", e)
