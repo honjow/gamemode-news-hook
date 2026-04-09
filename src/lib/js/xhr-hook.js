@@ -9,7 +9,7 @@
     var REPO_MIRRORS = /*REPO_MIRRORS*/[];
     var DETECTED_LANG = /*DETECTED_LANG*/'';
     var PREFETCHED_EVENTS = /*PREFETCHED_EVENTS*/null;
-    var VERSION = '1.2.1';
+    var VERSION = /*VERSION*/'0.0.0';
     window.__skXhrLog = [];
     window.__skVersion = VERSION;
 
@@ -215,12 +215,23 @@
     var GEN = Date.now();
     window.__skGen = GEN;
 
-    var origOpen = XMLHttpRequest.prototype.open;
-    var origSend = XMLHttpRequest.prototype.send;
-    var origGetter_rt = Object.getOwnPropertyDescriptor(
-        XMLHttpRequest.prototype, 'responseText');
-    var origGetter_r = Object.getOwnPropertyDescriptor(
-        XMLHttpRequest.prototype, 'response');
+    // Preserve the truly original XHR natives from the very first injection;
+    // on re-injection, restore the prototype first to prevent hook stacking.
+    if (!window.__skOrigOpen) {
+        window.__skOrigOpen = XMLHttpRequest.prototype.open;
+        window.__skOrigSend = XMLHttpRequest.prototype.send;
+        window.__skOrigGetter_rt = Object.getOwnPropertyDescriptor(
+            XMLHttpRequest.prototype, 'responseText');
+        window.__skOrigGetter_r = Object.getOwnPropertyDescriptor(
+            XMLHttpRequest.prototype, 'response');
+    } else {
+        XMLHttpRequest.prototype.open = window.__skOrigOpen;
+        XMLHttpRequest.prototype.send = window.__skOrigSend;
+    }
+    var origOpen = window.__skOrigOpen;
+    var origSend = window.__skOrigSend;
+    var origGetter_rt = window.__skOrigGetter_rt;
+    var origGetter_r = window.__skOrigGetter_r;
 
     // open override: tag matching requests / 重写 open：标记需拦截的请求
     XMLHttpRequest.prototype.open = function(method, url) {

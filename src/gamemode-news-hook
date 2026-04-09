@@ -27,6 +27,8 @@ import cef
 
 log = logging.getLogger("gamemode-news-hook")
 
+VERSION = "1.2.2"
+
 DEFAULTS = {
     "source": "repo",
     "clan_id": "46069703",
@@ -117,7 +119,7 @@ def setup_logging(debug=False):
 def read_js(filename):
     path = os.path.join(SCRIPT_DIR, "js", filename)
     with open(path, "r", encoding="utf-8") as f:
-        return f.read()
+        return f.read().replace("/*VERSION*/'0.0.0'", f"'{VERSION}'")
 
 
 def detect_steam_language(cfg, sjc_path):
