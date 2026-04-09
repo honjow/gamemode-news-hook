@@ -27,7 +27,7 @@ import cef
 
 log = logging.getLogger("gamemode-news-hook")
 
-VERSION = "1.2.2"
+VERSION = "1.2.3"
 
 DEFAULTS = {
     "source": "repo",
