@@ -106,53 +106,9 @@
     window.__skOurTitle = initEvents[0].event_name;
     window.__skLastRefresh = Date.now();
 
-    // Pre-fetch Valve frontpage events for sort order / 预取 Valve 前台活动以确定排序
-    var screenGids = [];
-    var screenSeen = {};
-    var tagSets = ['&require_tags=patchnotes', '&require_tags=patchnotes,stablechannel'];
-    for (var ti = 0; ti < tagSets.length; ti++) {
-        try {
-            var xv = new XMLHttpRequest();
-            xv.open('GET',
-                'https://store.steampowered.com/events/ajaxgetadjacentpartnerevents/'
-                + '?appid=' + TARGET_APPID
-                + '&count_before=0&count_after=1&lang_list=' + LANG_LIST
-                + '&only_summaries=true'
-                + tagSets[ti],
-                false);
-            xv.send();
-            if (xv.status === 200) {
-                var vr = JSON.parse(xv.responseText);
-                if (vr && vr.events) {
-                    for (var ve = 0; ve < vr.events.length; ve++) {
-                        var vgid = String(vr.events[ve].gid);
-                        if (!screenSeen[vgid]) {
-                            screenSeen[vgid] = true;
-                            screenGids.push({gid: vgid, time: vr.events[ve].rtime32_start_time || 0});
-                        }
-                    }
-                }
-            }
-        } catch(e) {}
-    }
-    screenGids.sort(function(a, b) { return b.time - a.time; });
-    window.__skValveRank = {};
-    for (var si = 0; si < screenGids.length; si++) {
-        window.__skValveRank[screenGids[si].gid] = si;
-        window.__skXhrLog.push('screen:' + screenGids[si].gid + '->rank' + si + ' t=' + screenGids[si].time);
-    }
-    window.__skNextFallbackIdx = screenGids.length;
-
-    window.__skTargetGids = {};
-    window.__skTargetCount = 0;
-    window.__skOrderLocked = false;
-
-    // Generation mechanism: invalidate stale hooks / 代际标记：使旧钩子失效，避免重复叠加
-    var GEN = Date.now();
-    window.__skGen = GEN;
-
     // Preserve the truly original XHR natives from the very first injection;
     // on re-injection, restore the prototype first to prevent hook stacking.
+    // Must run BEFORE async prefetch so those XHRs use native methods.
     if (!window.__skOrigOpen) {
         window.__skOrigOpen = XMLHttpRequest.prototype.open;
         window.__skOrigSend = XMLHttpRequest.prototype.send;
@@ -168,6 +124,71 @@
     var origSend = window.__skOrigSend;
     var origGetter_rt = window.__skOrigGetter_rt;
     var origGetter_r = window.__skOrigGetter_r;
+
+    // Pre-fetch Valve frontpage events for sort order (async to avoid blocking UI)
+    window.__skValveRank = {};
+    window.__skNextFallbackIdx = 0;
+
+    (function prefetchValveEventsAsync() {
+        var screenGids = [];
+        var screenSeen = {};
+        var tagSets = ['&require_tags=patchnotes', '&require_tags=patchnotes,stablechannel'];
+        var pending = tagSets.length;
+
+        function onAllDone() {
+            screenGids.sort(function(a, b) { return b.time - a.time; });
+            for (var si = 0; si < screenGids.length; si++) {
+                window.__skValveRank[screenGids[si].gid] = si;
+                window.__skXhrLog.push('screen:' + screenGids[si].gid + '->rank' + si + ' t=' + screenGids[si].time);
+            }
+            window.__skNextFallbackIdx = screenGids.length;
+        }
+
+        function handleResponse(xv) {
+            try {
+                if (xv.status === 200) {
+                    var vr = JSON.parse(xv.responseText);
+                    if (vr && vr.events) {
+                        for (var ve = 0; ve < vr.events.length; ve++) {
+                            var vgid = String(vr.events[ve].gid);
+                            if (!screenSeen[vgid]) {
+                                screenSeen[vgid] = true;
+                                screenGids.push({gid: vgid, time: vr.events[ve].rtime32_start_time || 0});
+                            }
+                        }
+                    }
+                }
+            } catch(e) {}
+            if (--pending <= 0) onAllDone();
+        }
+
+        for (var ti = 0; ti < tagSets.length; ti++) {
+            try {
+                var xv = new XMLHttpRequest();
+                xv.open('GET',
+                    'https://store.steampowered.com/events/ajaxgetadjacentpartnerevents/'
+                    + '?appid=' + TARGET_APPID
+                    + '&count_before=0&count_after=1&lang_list=' + LANG_LIST
+                    + '&only_summaries=true'
+                    + tagSets[ti],
+                    true);
+                xv.timeout = 8000;
+                xv.onload = (function(req) { return function() { handleResponse(req); }; })(xv);
+                xv.onerror = xv.ontimeout = (function(req) { return function() { handleResponse(req); }; })(xv);
+                xv.send();
+            } catch(e) {
+                if (--pending <= 0) onAllDone();
+            }
+        }
+    })();
+
+    window.__skTargetGids = {};
+    window.__skTargetCount = 0;
+    window.__skOrderLocked = false;
+
+    // Generation mechanism: invalidate stale hooks / 代际标记：使旧钩子失效，避免重复叠加
+    var GEN = Date.now();
+    window.__skGen = GEN;
 
     // open override: tag matching requests / 重写 open：标记需拦截的请求
     XMLHttpRequest.prototype.open = function(method, url) {
@@ -445,6 +466,12 @@
 
     }
 
+    var _bpPatchTimer = null;
+    function scheduleBPPatch() {
+        if (_bpPatchTimer) clearTimeout(_bpPatchTimer);
+        _bpPatchTimer = setTimeout(patchBPEvents, 150);
+    }
+
     // Phase 2: fix stale BBCode renderers in expanded detail view.
     // Debounced — runs 200ms after the last DOM mutation so the expanded view
     // is fully built before we scan.
@@ -474,7 +501,6 @@
                 var sexp = _getExpected(sevt.GID, sevt);
                 if (!sexp || scur.memoizedProps.text === sexp.body) continue;
 
-                // Stale body — update MobX maps so K reads new data on re-render
                 var sLang = 6;
                 if (sevt.description && sevt.description.set) {
                     if (sevt.description.data_)
@@ -488,7 +514,6 @@
                     sevt.name.set(nLang, sexp.name);
                 }
 
-                // Invalidate React.memo on K (parent with event prop)
                 var kCur = scur.return;
                 for (var kd = 0; kd < 10 && kCur; kd++, kCur = kCur.return) {
                     if (kCur.memoizedProps && kCur.memoizedProps.event === sevt) {
@@ -499,7 +524,6 @@
                     }
                 }
 
-                // forceUpdate on nearest class component
                 var fuCur = scur.return;
                 for (var fud = 0; fud < 15 && fuCur; fud++, fuCur = fuCur.return) {
                     if (fuCur.stateNode && typeof fuCur.stateNode.forceUpdate === 'function') {
@@ -518,7 +542,7 @@
         patchStaleBBCode();
         var bpObs = new MutationObserver(function() {
             if (window.__skGen !== GEN) { bpObs.disconnect(); return; }
-            patchBPEvents();
+            scheduleBPPatch();
             scheduleBBCodePatch();
         });
         bpObs.observe(document.body, { childList: true, subtree: true });

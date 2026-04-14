@@ -43,8 +43,10 @@
 
     patchDOM();
 
+    var _obsPatchTimer = null;
     window.__skObserver = new MutationObserver(function() {
-        patchDOM();
+        if (_obsPatchTimer) clearTimeout(_obsPatchTimer);
+        _obsPatchTimer = setTimeout(patchDOM, 200);
     });
     window.__skObserver.observe(document.body, { childList: true, subtree: true });
 
