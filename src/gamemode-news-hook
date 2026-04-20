@@ -27,7 +27,7 @@ import cef
 
 log = logging.getLogger("gamemode-news-hook")
 
-VERSION = "1.3.1"
+VERSION = "1.4.0"
 
 DEFAULTS = {
     "target_appid": "1675200",
