@@ -16,6 +16,7 @@ import signal
 import logging
 import configparser
 import urllib.request
+import urllib.error
 
 SCRIPT_DIR = "/usr/lib/gamemode-news-hook"
 CONFIG_PATH = "/etc/gamemode-news-hook.conf"
@@ -34,6 +35,7 @@ DEFAULTS = {
     "cef_port": "8080",
     "lang_list": "auto",
     "monitor_interval": "5",
+    "repo_refresh_interval": "1800",
 }
 
 
@@ -55,6 +57,7 @@ def load_config():
         "GNHOOK_CEF_PORT": "cef_port",
         "GNHOOK_LANG_LIST": "lang_list",
         "GNHOOK_MONITOR_INTERVAL": "monitor_interval",
+        "GNHOOK_REPO_REFRESH_INTERVAL": "repo_refresh_interval",
     }
     for env_key, cfg_key in env_map.items():
         val = os.environ.get(env_key)
@@ -64,6 +67,7 @@ def load_config():
     cfg["target_appid"] = int(cfg["target_appid"])
     cfg["cef_port"] = int(cfg["cef_port"])
     cfg["monitor_interval"] = int(cfg["monitor_interval"])
+    cfg["repo_refresh_interval"] = int(cfg["repo_refresh_interval"])
 
     cfg["repo_mirrors"] = []
     if parser.has_section("repo_mirrors"):
@@ -166,19 +170,142 @@ def apply_detected_language(cfg, sjc_path):
     log.info("lang_list=%s (lang=%s)", cfg["lang_list"], lang_name)
 
 
+_repo_etags = {}
+
+
 def fetch_repo_announcements(cfg):
-    """Fetch announcements.json from repo mirrors. Returns raw JSON list.
-    JS side handles filtering and event construction."""
+    """Fetch announcements.json from repo mirrors. Returns raw JSON list,
+    or None when an ETag-aware mirror reports 304 Not Modified.
+    JS side handles filtering and event construction.
+    从公告镜像拉取 announcements.json；任一镜像返回 304 时返回 None 表示未变化。"""
     for url in cfg.get("repo_mirrors", []):
         try:
-            resp = urllib.request.urlopen(url, timeout=15)
-            raw = json.loads(resp.read().decode("utf-8"))
-            log.info("Fetched announcements from %s: %d entries", url, len(raw))
-            return raw
+            req = urllib.request.Request(url)
+            cached_etag = _repo_etags.get(url)
+            if cached_etag:
+                req.add_header("If-None-Match", cached_etag)
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                new_etag = resp.headers.get("ETag")
+                if new_etag:
+                    _repo_etags[url] = new_etag
+                raw = json.loads(resp.read().decode("utf-8"))
+                log.info("Fetched announcements from %s: %d entries", url, len(raw))
+                return raw
+        except urllib.error.HTTPError as e:
+            if e.code == 304:
+                log.debug("Repo not modified (ETag) from %s", url)
+                return None
+            log.warning("Mirror failed %s: HTTP %d", url, e.code)
         except Exception as e:
             log.warning("Mirror failed %s: %s", url, e)
     log.error("All repo mirrors failed")
     return []
+
+
+# JS expression yielding a deterministic signature of __skOurEvents so we can
+# cheaply detect in-page refreshes (e.g. triggered by user "Check for updates")
+# and propagate the result to the BigPicture context.
+# 计算 __skOurEvents 的签名表达式，用于廉价检测页内刷新（如用户手动检查更新），
+# 进而把新数据同步到 BigPicture 上下文。
+SJC_SIGNATURE_JS = (
+    "(function(){"
+    "var e=window.__skOurEvents||[];"
+    "if(!e.length)return '';"
+    "return e.length+':'+e.map(function(x){"
+    "return (x.event_name||'')+'|'+((x.announcement_body&&x.announcement_body.body)||'').length;"
+    "}).join(';');"
+    "})()"
+)
+
+
+def _apply_events_via_cdp(cfg, ws_path, events):
+    """Push a parsed events list into one CEF context and invoke window.__skApply.
+    向单个 CEF 上下文推送已 parse 的 events 并触发 window.__skApply。"""
+    host, port = cfg["cef_host"], cfg["cef_port"]
+    events_json = json.dumps(events, ensure_ascii=False)
+    js = (
+        "(function(){"
+        "if(typeof window.__skApply!=='function')"
+        "return JSON.stringify({error:'no apply api'});"
+        "window.__skApply(" + events_json + ");"
+        "return JSON.stringify({applied:" + str(len(events)) + "});"
+        "})()"
+    )
+    ws = cef.connect(host, port, ws_path)
+    try:
+        return cef.evaluate(ws, js)
+    finally:
+        ws.close()
+
+
+def _apply_raw_via_cdp(cfg, ws_path, raw):
+    """Push raw repo JSON into one CEF context: re-parse via window.__skParseRepo
+    (so per-context lang/branch filtering applies) then invoke window.__skApply.
+    向单个 CEF 上下文推送原始 raw JSON：先用 window.__skParseRepo 在该上下文里
+    parse（应用各自上下文的 lang/branch 过滤），再触发 window.__skApply。"""
+    host, port = cfg["cef_host"], cfg["cef_port"]
+    raw_json = json.dumps(raw, ensure_ascii=False)
+    js = (
+        "(function(){"
+        "if(typeof window.__skParseRepo!=='function'||typeof window.__skApply!=='function')"
+        "return JSON.stringify({error:'no apply api'});"
+        "var events=window.__skParseRepo(" + raw_json + ");"
+        "if(!events||!events.length)"
+        "return JSON.stringify({applied:0,reason:'parse-empty'});"
+        "window.__skApply(events);"
+        "return JSON.stringify({applied:events.length});"
+        "})()"
+    )
+    ws = cef.connect(host, port, ws_path)
+    try:
+        return cef.evaluate(ws, js)
+    finally:
+        ws.close()
+
+
+def push_repo_to_both(cfg, sjc_path, bp_path, raw):
+    """Push freshly fetched raw repo JSON to both contexts.
+    把新拉取到的 raw 公告推到两个上下文。"""
+    log.info("Pushing fresh repo (%d entries) to SJC + BP", len(raw))
+    try:
+        log.info("  SJC apply: %s", _apply_raw_via_cdp(cfg, sjc_path, raw))
+    except Exception as e:
+        log.warning("SJC apply failed: %s", e)
+    try:
+        log.info("  BP  apply: %s", _apply_raw_via_cdp(cfg, bp_path, raw))
+    except Exception as e:
+        log.warning("BP apply failed: %s", e)
+
+
+def propagate_sjc_to_bp(cfg, sjc_path, bp_path):
+    """Read current __skOurEvents from SJC, push it to BP and trigger __skApply.
+    Used to bridge in-page refreshes (only SJC sees the partnerevents XHR) over
+    to BigPicture so the user-visible cards update too.
+    读取 SJC 当前的 __skOurEvents，推到 BP 并触发 __skApply。
+    用于桥接页内刷新（partnerevents XHR 只发生在 SJC）到 BigPicture，
+    使用户实际看到的卡片同步更新。"""
+    host, port = cfg["cef_host"], cfg["cef_port"]
+    ws = cef.connect(host, port, sjc_path)
+    try:
+        ours_json = cef.evaluate(ws, "JSON.stringify(window.__skOurEvents || [])")
+    finally:
+        ws.close()
+    if not ours_json or ours_json == "[]":
+        return None
+    js = (
+        "(function(){"
+        "if(typeof window.__skApply!=='function')"
+        "return JSON.stringify({error:'no apply api'});"
+        "var e=" + ours_json + ";"
+        "window.__skApply(e);"
+        "return JSON.stringify({applied:e.length});"
+        "})()"
+    )
+    ws = cef.connect(host, port, bp_path)
+    try:
+        return cef.evaluate(ws, js)
+    finally:
+        ws.close()
 
 
 def _build_xhr_hook_js(cfg):
@@ -230,19 +357,24 @@ def inject(cfg, sjc_path, bp_path, navigate=False):
         ws_bp.close()
 
 
-def monitor_cef(cfg, sjc_path):
-    """Poll hook liveness via __skGen and detect OS branch changes.
+def monitor_cef(cfg, sjc_path, bp_path):
+    """Poll hook liveness, propagate in-page refreshes to BigPicture, and
+    perform periodic background fetch of remote announcements.
     Returns when hook is gone, CEF is down, or branch changed (triggers re-inject).
-    通过 __skGen 轮询钩子存活并检测 OS 分支变化。
+    轮询钩子存活、把 SJC 的页内刷新同步到 BigPicture、定期后台回拉远程公告。
     钩子丢失、CEF 不可达、或分支变更时返回（触发重新注入）。"""
     host, port = cfg["cef_host"], cfg["cef_port"]
     interval = cfg["monitor_interval"]
+    refresh_interval = cfg.get("repo_refresh_interval", 1800)
     fail_count = 0
     max_failures = 2
     last_branch = cfg.get("current_branch", "")
+    last_sjc_signature = None
+    last_repo_fetch = time.time()
 
     while not _shutdown:
         time.sleep(interval)
+        sig = None
         try:
             ws = cef.connect(host, port, sjc_path)
             try:
@@ -261,6 +393,7 @@ def monitor_cef(cfg, sjc_path):
                         log.info("OS branch changed: %s -> %s, re-injecting",
                                  last_branch, branch)
                         return
+                sig = cef.evaluate(ws, SJC_SIGNATURE_JS)
             finally:
                 ws.close()
             fail_count = 0
@@ -270,6 +403,40 @@ def monitor_cef(cfg, sjc_path):
                 log.info("CEF unreachable after %d attempts: %s", fail_count, e)
                 return
             log.debug("Monitor check failed (attempt %d/%d): %s", fail_count, max_failures, e)
+            continue
+
+        # Bridge: if SJC's __skOurEvents changed (e.g. user-triggered XHR
+        # refresh), propagate the same data to BigPicture so visible cards update.
+        # 桥接：若 SJC 的 __skOurEvents 变了（如用户触发的检查更新），
+        # 把同样的数据同步到 BigPicture，刷新可见卡片。
+        if sig and last_sjc_signature is not None and sig != last_sjc_signature:
+            log.info("SJC events updated, propagating to BigPicture")
+            try:
+                res = propagate_sjc_to_bp(cfg, sjc_path, bp_path)
+                log.info("BP propagate result: %s", res)
+            except Exception as e:
+                log.warning("Propagate to BP failed: %s", e)
+        if sig:
+            last_sjc_signature = sig
+
+        # Periodic background fetch — covers cases where the user never visits
+        # the updates page but remote content has changed.
+        # 定时后台回拉 —— 覆盖用户从不进入更新页但远程已变的场景。
+        if refresh_interval > 0 and (time.time() - last_repo_fetch) >= refresh_interval:
+            last_repo_fetch = time.time()
+            try:
+                raw = fetch_repo_announcements(cfg)
+                if raw is None:
+                    log.debug("Repo refresh: not modified")
+                elif raw and raw != cfg.get("prefetched_events"):
+                    log.info("Repo refresh: content changed (%d entries), pushing", len(raw))
+                    cfg["prefetched_events"] = raw
+                    push_repo_to_both(cfg, sjc_path, bp_path, raw)
+                    last_sjc_signature = None
+                else:
+                    log.debug("Repo refresh: no content change")
+            except Exception as e:
+                log.warning("Repo refresh failed: %s", e)
 
 
 _shutdown = False
@@ -290,8 +457,9 @@ def main():
     signal.signal(signal.SIGINT, _handle_signal)
 
     cfg = load_config()
-    log.info("Config: target_appid=%d, cef=%s:%d",
-             cfg["target_appid"], cfg["cef_host"], cfg["cef_port"])
+    log.info("Config: target_appid=%d, cef=%s:%d, monitor=%ds, repo_refresh=%ds",
+             cfg["target_appid"], cfg["cef_host"], cfg["cef_port"],
+             cfg["monitor_interval"], cfg["repo_refresh_interval"])
 
     if not auto:
         log.info("Manual mode: connecting to CEF...")
@@ -306,7 +474,8 @@ def main():
         if cfg["lang_list"] == "auto":
             apply_detected_language(cfg, sjc_path)
         cfg["current_branch"] = detect_os_branch(cfg, sjc_path)
-        cfg["prefetched_events"] = fetch_repo_announcements(cfg)
+        raw = fetch_repo_announcements(cfg)
+        cfg["prefetched_events"] = raw if raw else []
         inject(cfg, sjc_path, bp_path, navigate=True)
         log.info("Done.")
         return
@@ -323,7 +492,8 @@ def main():
         if auto_lang:
             apply_detected_language(cfg, sjc_path)
         cfg["current_branch"] = detect_os_branch(cfg, sjc_path)
-        cfg["prefetched_events"] = fetch_repo_announcements(cfg)
+        raw = fetch_repo_announcements(cfg)
+        cfg["prefetched_events"] = raw if raw else []
 
         try:
             inject(cfg, sjc_path, bp_path)
@@ -333,7 +503,7 @@ def main():
             time.sleep(5)
             continue
 
-        monitor_cef(cfg, sjc_path)
+        monitor_cef(cfg, sjc_path, bp_path)
         if not _shutdown:
             log.info("Hook lost or CEF disconnected, will re-inject")
 

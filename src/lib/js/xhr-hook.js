@@ -11,6 +11,11 @@
 
     var TARGET_APPID_STR = 'appid=' + TARGET_APPID;
 
+    // Exposed via window.__skParseRepo at the bottom of this IIFE so external
+    // callers (e.g. Python pushing fresh announcements over CDP) can reuse
+    // the exact same filtering / event-construction pipeline as the in-page
+    // refresh path. / 在 IIFE 末尾通过 window.__skParseRepo 暴露，
+    // 供外部（如 Python 通过 CDP 推送新公告时）复用同一套过滤/构造流程。
     function parseRepoJSON(raw) {
         if (!raw || raw.length === 0) return null;
         var channelOk = [];
@@ -69,15 +74,8 @@
                     try {
                         var events = parseRepoJSON(JSON.parse(x.responseText));
                         if (events && events.length > 0) {
-                            var changed = events.length !== (window.__skOurEvents || []).length;
-                            window.__skOurEvents = events;
-                            window.__skOurTitle = events[0].event_name;
-                            if (changed) {
-                                window.__skTargetGids = {};
-                                window.__skTargetCount = 0;
-                                window.__skNextFallbackIdx = Object.keys(window.__skValveRank || {}).length;
-                            }
-                            window.__skXhrLog.push('repo-refresh:' + events.length + ' events' + (changed ? ' (reset)' : ''));
+                            applyNewEvents(events);
+                            window.__skXhrLog.push('repo-refresh:' + events.length + ' events (via apply)');
                         }
                     } catch(e) {}
                 } else {
@@ -91,9 +89,16 @@
         tryNext();
     }
 
+    // Throttle window between in-page refresh attempts.
+    // Python daemon also performs periodic background fetch (with ETag),
+    // so this only needs to cover bursty user-triggered refreshes.
+    // 页内刷新节流间隔。Python 守护进程会按 ETag 周期性后台回拉，
+    // 这里只需覆盖用户操作引发的密集触发。
+    var REFRESH_THROTTLE_MS = 60000;
+
     function refreshEvents() {
         var now = Date.now();
-        if (window.__skLastRefresh && (now - window.__skLastRefresh) < 10000) return;
+        if (window.__skLastRefresh && (now - window.__skLastRefresh) < REFRESH_THROTTLE_MS) return;
         window.__skLastRefresh = now;
         if (REPO_MIRRORS.length > 0) { refreshRepoAsync(); return; }
     }
@@ -339,13 +344,14 @@
     };
 
     // Flush PartnerEventStore caches for TARGET_APPID so stale entries
-    // don't survive across re-injections (MobX ObservableMap).
-    var storeCleared = 0;
-    try {
-        if (typeof g_PartnerEventStore !== 'undefined') {
+    // don't survive across re-injections / refreshes (MobX ObservableMap).
+    // 清空 PartnerEventStore 中目标 appid 的缓存条目，避免跨注入/刷新残留。
+    function clearPartnerStore() {
+        var cleared = 0;
+        try {
+            if (typeof g_PartnerEventStore === 'undefined') return 0;
             var store = g_PartnerEventStore;
 
-            // m_mapExistingEvents: event GID -> event object
             if (store.m_mapExistingEvents && store.m_mapExistingEvents.data_) {
                 var toDelete = [];
                 store.m_mapExistingEvents.data_.forEach(function(v, k) {
@@ -353,36 +359,61 @@
                     if (val && val.appid === TARGET_APPID) toDelete.push(k);
                 });
                 for (var di = 0; di < toDelete.length; di++) store.m_mapExistingEvents.delete(toDelete[di]);
-                storeCleared += toDelete.length;
+                cleared += toDelete.length;
             }
 
-            // m_mapAnnouncementBodyToEvent: announcement body GID -> event object
-            // Values lack appid, so clear all entries unconditionally.
+            // Values lack appid, clear all entries unconditionally.
             if (store.m_mapAnnouncementBodyToEvent && store.m_mapAnnouncementBodyToEvent.data_) {
                 var abDel = [];
                 store.m_mapAnnouncementBodyToEvent.data_.forEach(function(v, k) { abDel.push(k); });
                 for (var di = 0; di < abDel.length; di++) store.m_mapAnnouncementBodyToEvent.delete(abDel[di]);
-                storeCleared += abDel.length;
+                cleared += abDel.length;
             }
 
-            // m_mapAppIDToGIDs
             if (store.m_mapAppIDToGIDs && store.m_mapAppIDToGIDs.delete) {
                 store.m_mapAppIDToGIDs.delete(TARGET_APPID);
                 store.m_mapAppIDToGIDs.delete(String(TARGET_APPID));
             }
 
-            // m_mapClanToGIDs
             if (store.m_mapClanToGIDs && store.m_mapClanToGIDs.data_) {
                 var clanDel = [];
                 store.m_mapClanToGIDs.data_.forEach(function(v, k) { clanDel.push(k); });
                 for (var di = 0; di < clanDel.length; di++) store.m_mapClanToGIDs.delete(clanDel[di]);
             }
-
-            window.__skXhrLog.push('store:cleared ' + storeCleared + ' cached entries');
+        } catch(e) {
+            window.__skXhrLog.push('store:clear error ' + e.message);
         }
-    } catch(e) {
-        window.__skXhrLog.push('store:clear error ' + e.message);
+        return cleared;
     }
+
+    // Re-apply a fresh set of events in-place: swap __skOurEvents, reset
+    // mapping state when shape changes, flush MobX caches and patch any
+    // already-rendered React fibers. Used by both the in-page XHR refresh
+    // path and external CDP-pushed refresh from the Python daemon.
+    // 就地应用一组新公告：替换 __skOurEvents、按需重置映射、清 MobX 缓存、
+    // 修补已渲染的 React fiber。XHR 内刷新与 Python 守护推送共用此函数。
+    function applyNewEvents(newOurs) {
+        if (!newOurs || !newOurs.length) return 0;
+        var prev = window.__skOurEvents || [];
+        var changed = newOurs.length !== prev.length
+            || (prev[0] && newOurs[0].event_name !== prev[0].event_name);
+        window.__skOurEvents = newOurs;
+        window.__skOurTitle = newOurs[0].event_name;
+        if (changed) {
+            window.__skTargetGids = {};
+            window.__skTargetCount = 0;
+            window.__skNextFallbackIdx = Object.keys(window.__skValveRank || {}).length;
+        }
+        var c = clearPartnerStore();
+        if (typeof patchBPEvents === 'function') patchBPEvents();
+        if (typeof patchStaleBBCode === 'function') patchStaleBBCode();
+        window.__skXhrLog.push('apply:' + newOurs.length + ' events storeCleared=' + c
+            + (changed ? ' (reset)' : ''));
+        return newOurs.length;
+    }
+
+    var storeCleared = clearPartnerStore();
+    window.__skXhrLog.push('store:cleared ' + storeCleared + ' cached entries');
 
     // Patch stale event data already rendered in BigPicture's React tree.
     var bpPatched = 0;
@@ -547,6 +578,12 @@
         });
         bpObs.observe(document.body, { childList: true, subtree: true });
     }
+
+    // Expose a stable surface for external refresh (Python daemon over CDP)
+    // and for sharing the parse pipeline.
+    // 对外稳定接口：供 Python 守护进程通过 CDP 触发外部刷新，并共享解析流程。
+    window.__skParseRepo = parseRepoJSON;
+    window.__skApply = applyNewEvents;
 
     return JSON.stringify({
         ok: true,
