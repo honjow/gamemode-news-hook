@@ -189,6 +189,9 @@
 
     window.__skTargetGids = {};
     window.__skTargetCount = 0;
+    window.__skAnchorGid = null;
+    window.__skAnchorTime = 0;
+    window.__skAnchoredEvents = {};
     window.__skOrderLocked = false;
 
     // Generation mechanism: invalidate stale hooks / 代际标记：使旧钩子失效，避免重复叠加
@@ -229,50 +232,64 @@
                     break;
                 }
             }
-            if (anchorEvent) {
+            if (anchorEvent && (window.__skAnchorGid !== anchorGid ||
+                window.__skAnchorTime !== (anchorEvent.rtime32_start_time || 0))) {
+                window.__skAnchorGid = anchorGid;
                 window.__skAnchorTime = anchorEvent.rtime32_start_time || 0;
-                var previous = window.__skTargetGids[anchorGid];
-                if (!previous || previous.idx !== 0) {
-                    if (previous) window.__skTargetCount--;
-                    for (var oldGid in window.__skTargetGids) {
-                        if (oldGid !== anchorGid && window.__skTargetGids[oldGid].idx === 0) {
-                            delete window.__skTargetGids[oldGid];
-                            window.__skTargetCount--;
-                        }
-                    }
-                    window.__skTargetGids[anchorGid] = {idx: 0};
-                    window.__skTargetCount++;
+                window.__skAnchoredEvents = {};
+            }
+
+            if (anchorGid && window.__skAnchorGid === anchorGid && window.__skAnchorTime) {
+                // Rebuild from all observed events at or before the selected
+                // event. Absolute Valve ranks include newer events, so they
+                // cannot index the announcement list in this view.
+                for (var i = 0; i < orig.events.length; i++) {
+                    var candidate = orig.events[i];
+                    var candidateTime = candidate.rtime32_start_time || 0;
+                    if (candidateTime && candidateTime <= window.__skAnchorTime)
+                        window.__skAnchoredEvents[String(candidate.gid)] = candidateTime;
                 }
-            }
-
-            // Build set of ours indices already assigned in this response
-            var usedIdx = {};
-            for (var i = 0; i < orig.events.length; i++) {
-                var entry = window.__skTargetGids[String(orig.events[i].gid)];
-                if (entry) usedIdx[entry.idx] = true;
-            }
-
-            for (var i = 0; i < orig.events.length && window.__skTargetCount < ours.length; i++) {
-                var g = String(orig.events[i].gid);
-                if (anchorGid && window.__skAnchorTime && g !== anchorGid &&
-                    orig.events[i].rtime32_start_time > window.__skAnchorTime) continue;
-                if (!window.__skTargetGids[g]) {
-                    var rank = window.__skValveRank[g];
-                    var idx = -1;
-                    if (rank !== undefined && rank < ours.length && !usedIdx[rank]) {
-                        idx = rank;
-                    } else {
-                        for (var fi = 0; fi < ours.length; fi++) {
-                            if (!usedIdx[fi]) { idx = fi; break; }
+                var older = Object.keys(window.__skAnchoredEvents).filter(function(g) {
+                    return g !== anchorGid;
+                });
+                older.sort(function(a, b) {
+                    return window.__skAnchoredEvents[b] - window.__skAnchoredEvents[a]
+                        || (a < b ? -1 : a > b ? 1 : 0);
+                });
+                window.__skTargetGids = {};
+                window.__skTargetGids[anchorGid] = {idx: 0, time: window.__skAnchorTime};
+                for (var oi = 0; oi < older.length && oi + 1 < ours.length; oi++)
+                    window.__skTargetGids[older[oi]] = {
+                        idx: oi + 1, time: window.__skAnchoredEvents[older[oi]]
+                    };
+                window.__skTargetCount = Object.keys(window.__skTargetGids).length;
+            } else {
+                // Retain the original absolute-rank behavior for unanchored requests.
+                var usedIdx = {};
+                for (var i = 0; i < orig.events.length; i++) {
+                    var entry = window.__skTargetGids[String(orig.events[i].gid)];
+                    if (entry) usedIdx[entry.idx] = true;
+                }
+                for (var i = 0; i < orig.events.length && window.__skTargetCount < ours.length; i++) {
+                    var g = String(orig.events[i].gid);
+                    if (!window.__skTargetGids[g]) {
+                        var rank = window.__skValveRank[g];
+                        var idx = -1;
+                        if (rank !== undefined && rank < ours.length && !usedIdx[rank]) {
+                            idx = rank;
+                        } else {
+                            for (var fi = 0; fi < ours.length; fi++) {
+                                if (!usedIdx[fi]) { idx = fi; break; }
+                            }
                         }
-                    }
-                    if (idx >= 0 && idx < ours.length) {
-                        window.__skTargetGids[g] = {
-                            idx: idx,
-                            time: orig.events[i].rtime32_start_time || 0
-                        };
-                        usedIdx[idx] = true;
-                        window.__skTargetCount++;
+                        if (idx >= 0 && idx < ours.length) {
+                            window.__skTargetGids[g] = {
+                                idx: idx,
+                                time: orig.events[i].rtime32_start_time || 0
+                            };
+                            usedIdx[idx] = true;
+                            window.__skTargetCount++;
+                        }
                     }
                 }
             }
@@ -432,6 +449,9 @@
         if (changed) {
             window.__skTargetGids = {};
             window.__skTargetCount = 0;
+            window.__skAnchorGid = null;
+            window.__skAnchorTime = 0;
+            window.__skAnchoredEvents = {};
             window.__skNextFallbackIdx = Object.keys(window.__skValveRank || {}).length;
         }
         var c = clearPartnerStore();
