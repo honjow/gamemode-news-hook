@@ -189,6 +189,9 @@
 
     window.__skTargetGids = {};
     window.__skTargetCount = 0;
+    window.__skAnchorGid = null;
+    window.__skAnchorTime = 0;
+    window.__skAnchoredEvents = {};
     window.__skOrderLocked = false;
 
     // Generation mechanism: invalidate stale hooks / 代际标记：使旧钩子失效，避免重复叠加
@@ -198,6 +201,8 @@
     // open override: tag matching requests / 重写 open：标记需拦截的请求
     XMLHttpRequest.prototype.open = function(method, url) {
         this.__skUrl = String(url);
+        var anchorMatch = this.__skUrl.match(/[?&]gidevent=([0-9]+)/);
+        this.__skAnchorGid = anchorMatch ? anchorMatch[1] : null;
         this.__skGen = window.__skGen;
         this.__skTarget = (
             this.__skUrl.indexOf('ajaxgetadjacentpartnerevents') !== -1 &&
@@ -211,38 +216,80 @@
     };
 
     // doReplace: core replacement logic / 核心：将响应中的目标活动替换为社区公告
-    function doReplace(rawText) {
+    function doReplace(rawText, anchorGid) {
         try {
             var orig = JSON.parse(rawText);
             var ours = window.__skOurEvents;
             if (!orig.events || !ours) return rawText;
 
-            // Build set of ours indices already assigned in this response
-            var usedIdx = {};
-            for (var i = 0; i < orig.events.length; i++) {
-                var entry = window.__skTargetGids[String(orig.events[i].gid)];
-                if (entry) usedIdx[entry.idx] = true;
+            // Steam's settings page requests events around the selected event.
+            // That event can be an older Valve release while our feed has a
+            // newer release. Keep the selected card on our newest announcement.
+            var anchorEvent = null;
+            if (anchorGid) for (var ai = 0; ai < orig.events.length; ai++) {
+                if (String(orig.events[ai].gid) === anchorGid) {
+                    anchorEvent = orig.events[ai];
+                    break;
+                }
+            }
+            if (anchorEvent && (window.__skAnchorGid !== anchorGid ||
+                window.__skAnchorTime !== (anchorEvent.rtime32_start_time || 0))) {
+                window.__skAnchorGid = anchorGid;
+                window.__skAnchorTime = anchorEvent.rtime32_start_time || 0;
+                window.__skAnchoredEvents = {};
             }
 
-            for (var i = 0; i < orig.events.length && window.__skTargetCount < ours.length; i++) {
-                var g = String(orig.events[i].gid);
-                if (!window.__skTargetGids[g]) {
-                    var rank = window.__skValveRank[g];
-                    var idx = -1;
-                    if (rank !== undefined && rank < ours.length && !usedIdx[rank]) {
-                        idx = rank;
-                    } else {
-                        for (var fi = 0; fi < ours.length; fi++) {
-                            if (!usedIdx[fi]) { idx = fi; break; }
+            if (anchorGid && window.__skAnchorGid === anchorGid && window.__skAnchorTime) {
+                // Rebuild from all observed events at or before the selected
+                // event. Absolute Valve ranks include newer events, so they
+                // cannot index the announcement list in this view.
+                for (var i = 0; i < orig.events.length; i++) {
+                    var candidate = orig.events[i];
+                    var candidateTime = candidate.rtime32_start_time || 0;
+                    if (candidateTime && candidateTime <= window.__skAnchorTime)
+                        window.__skAnchoredEvents[String(candidate.gid)] = candidateTime;
+                }
+                var older = Object.keys(window.__skAnchoredEvents).filter(function(g) {
+                    return g !== anchorGid;
+                });
+                older.sort(function(a, b) {
+                    return window.__skAnchoredEvents[b] - window.__skAnchoredEvents[a]
+                        || (a < b ? -1 : a > b ? 1 : 0);
+                });
+                window.__skTargetGids = {};
+                window.__skTargetGids[anchorGid] = {idx: 0, time: window.__skAnchorTime};
+                for (var oi = 0; oi < older.length && oi + 1 < ours.length; oi++)
+                    window.__skTargetGids[older[oi]] = {
+                        idx: oi + 1, time: window.__skAnchoredEvents[older[oi]]
+                    };
+                window.__skTargetCount = Object.keys(window.__skTargetGids).length;
+            } else {
+                // Retain the original absolute-rank behavior for unanchored requests.
+                var usedIdx = {};
+                for (var i = 0; i < orig.events.length; i++) {
+                    var entry = window.__skTargetGids[String(orig.events[i].gid)];
+                    if (entry) usedIdx[entry.idx] = true;
+                }
+                for (var i = 0; i < orig.events.length && window.__skTargetCount < ours.length; i++) {
+                    var g = String(orig.events[i].gid);
+                    if (!window.__skTargetGids[g]) {
+                        var rank = window.__skValveRank[g];
+                        var idx = -1;
+                        if (rank !== undefined && rank < ours.length && !usedIdx[rank]) {
+                            idx = rank;
+                        } else {
+                            for (var fi = 0; fi < ours.length; fi++) {
+                                if (!usedIdx[fi]) { idx = fi; break; }
+                            }
                         }
-                    }
-                    if (idx >= 0 && idx < ours.length) {
-                        window.__skTargetGids[g] = {
-                            idx: idx,
-                            time: orig.events[i].rtime32_start_time || 0
-                        };
-                        usedIdx[idx] = true;
-                        window.__skTargetCount++;
+                        if (idx >= 0 && idx < ours.length) {
+                            window.__skTargetGids[g] = {
+                                idx: idx,
+                                time: orig.events[i].rtime32_start_time || 0
+                            };
+                            usedIdx[idx] = true;
+                            window.__skTargetCount++;
+                        }
                     }
                 }
             }
@@ -315,7 +362,7 @@
             if (cacheReady) return cached;
             cacheReady = true;
             var raw = origGetter_rt.get.call(self);
-            var result = doReplace(raw);
+            var result = doReplace(raw, self.__skAnchorGid);
             cached = (result !== raw) ? result : null;
             return cached;
         }
@@ -402,6 +449,9 @@
         if (changed) {
             window.__skTargetGids = {};
             window.__skTargetCount = 0;
+            window.__skAnchorGid = null;
+            window.__skAnchorTime = 0;
+            window.__skAnchoredEvents = {};
             window.__skNextFallbackIdx = Object.keys(window.__skValveRank || {}).length;
         }
         var c = clearPartnerStore();
