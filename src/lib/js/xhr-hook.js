@@ -198,6 +198,8 @@
     // open override: tag matching requests / 重写 open：标记需拦截的请求
     XMLHttpRequest.prototype.open = function(method, url) {
         this.__skUrl = String(url);
+        var anchorMatch = this.__skUrl.match(/[?&]gidevent=([0-9]+)/);
+        this.__skAnchorGid = anchorMatch ? anchorMatch[1] : null;
         this.__skGen = window.__skGen;
         this.__skTarget = (
             this.__skUrl.indexOf('ajaxgetadjacentpartnerevents') !== -1 &&
@@ -211,11 +213,37 @@
     };
 
     // doReplace: core replacement logic / 核心：将响应中的目标活动替换为社区公告
-    function doReplace(rawText) {
+    function doReplace(rawText, anchorGid) {
         try {
             var orig = JSON.parse(rawText);
             var ours = window.__skOurEvents;
             if (!orig.events || !ours) return rawText;
+
+            // Steam's settings page requests events around the selected event.
+            // That event can be an older Valve release while our feed has a
+            // newer release. Keep the selected card on our newest announcement.
+            var anchorEvent = null;
+            if (anchorGid) for (var ai = 0; ai < orig.events.length; ai++) {
+                if (String(orig.events[ai].gid) === anchorGid) {
+                    anchorEvent = orig.events[ai];
+                    break;
+                }
+            }
+            if (anchorEvent) {
+                window.__skAnchorTime = anchorEvent.rtime32_start_time || 0;
+                var previous = window.__skTargetGids[anchorGid];
+                if (!previous || previous.idx !== 0) {
+                    if (previous) window.__skTargetCount--;
+                    for (var oldGid in window.__skTargetGids) {
+                        if (oldGid !== anchorGid && window.__skTargetGids[oldGid].idx === 0) {
+                            delete window.__skTargetGids[oldGid];
+                            window.__skTargetCount--;
+                        }
+                    }
+                    window.__skTargetGids[anchorGid] = {idx: 0};
+                    window.__skTargetCount++;
+                }
+            }
 
             // Build set of ours indices already assigned in this response
             var usedIdx = {};
@@ -226,6 +254,8 @@
 
             for (var i = 0; i < orig.events.length && window.__skTargetCount < ours.length; i++) {
                 var g = String(orig.events[i].gid);
+                if (anchorGid && window.__skAnchorTime && g !== anchorGid &&
+                    orig.events[i].rtime32_start_time > window.__skAnchorTime) continue;
                 if (!window.__skTargetGids[g]) {
                     var rank = window.__skValveRank[g];
                     var idx = -1;
@@ -315,7 +345,7 @@
             if (cacheReady) return cached;
             cacheReady = true;
             var raw = origGetter_rt.get.call(self);
-            var result = doReplace(raw);
+            var result = doReplace(raw, self.__skAnchorGid);
             cached = (result !== raw) ? result : null;
             return cached;
         }
